@@ -5,35 +5,19 @@
 #include <AzCore/Serialization/SerializeContext.h>
 
 #include <Clients/JoltWaterVolumeComponent.h>
+#include <Clients/JoltWaterVolumeRender.h>
 
 namespace JoltBuoyancy
 {
-    namespace
-    {
-        // The 12 edges of a box, as pairs of corner indices.
-        constexpr AZ::u32 BoxEdges[][2] = {
-            { 0, 1 }, { 1, 3 }, { 3, 2 }, { 2, 0 },
-            { 4, 5 }, { 5, 7 }, { 7, 6 }, { 6, 4 },
-            { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 },
-        };
-
-        AZ::Vector3 BoxCorner(const AZ::Vector3& halfExtents, AZ::u32 corner)
-        {
-            return AZ::Vector3(
-                (corner & 1) ? halfExtents.GetX() : -halfExtents.GetX(),
-                (corner & 2) ? halfExtents.GetY() : -halfExtents.GetY(),
-                (corner & 4) ? halfExtents.GetZ() : -halfExtents.GetZ());
-        }
-    }
-
     void EditorJoltWaterVolumeComponent::Reflect(AZ::ReflectContext* context)
     {
         if (auto* serializeContext = azrtti_cast<AZ::SerializeContext*>(context))
         {
             serializeContext->Class<EditorJoltWaterVolumeComponent, AzToolsFramework::Components::EditorComponentBase>()
-                ->Version(1)
+                ->Version(2)
                 ->Field("Dimensions", &EditorJoltWaterVolumeComponent::m_dimensions)
                 ->Field("Settings", &EditorJoltWaterVolumeComponent::m_settings)
+                ->Field("Visible", &EditorJoltWaterVolumeComponent::m_visible)
                 ;
 
             if (AZ::EditContext* editContext = serializeContext->GetEditContext())
@@ -50,6 +34,10 @@ namespace JoltBuoyancy
                         ->Attribute(AZ::Edit::Attributes::Suffix, " m")
                     ->DataElement(AZ::Edit::UIHandlers::Default, &EditorJoltWaterVolumeComponent::m_settings,
                         "Water", "Fluid properties")
+                    ->DataElement(AZ::Edit::UIHandlers::CheckBox, &EditorJoltWaterVolumeComponent::m_visible,
+                        "Visible", "Draw the water as a translucent box, in the viewport and in game mode. There is "
+                        "no water mesh or material: this drawing is the volume itself, so it always matches what the "
+                        "solver uses.")
                     ;
             }
         }
@@ -88,32 +76,22 @@ namespace JoltBuoyancy
         {
             component->GetDimensions() = m_dimensions;
             component->GetSettings() = m_settings;
+            component->GetVisible() = m_visible;
         }
     }
 
     void EditorJoltWaterVolumeComponent::DisplayEntityViewport(
         const AzFramework::ViewportInfo& /*viewportInfo*/, AzFramework::DebugDisplayRequests& debugDisplay)
     {
+        if (!m_visible)
+        {
+            return;
+        }
+
         AZ::Transform worldTransform = AZ::Transform::CreateIdentity();
         AZ::TransformBus::EventResult(worldTransform, GetEntityId(), &AZ::TransformBus::Events::GetWorldTM);
 
-        const AZ::Vector3 halfExtents = m_dimensions * 0.5f;
-        const AZ::Vector4 volumeColor(0.2f, 0.5f, 1.0f, 1.0f);
-        for (const auto& edge : BoxEdges)
-        {
-            debugDisplay.DrawLine(
-                worldTransform.TransformPoint(BoxCorner(halfExtents, edge[0])),
-                worldTransform.TransformPoint(BoxCorner(halfExtents, edge[1])), volumeColor, volumeColor);
-        }
-
-        // Mark the surface (the top face) so it is obvious which way up the volume is.
-        const AZ::Vector4 surfaceColor(0.6f, 0.9f, 1.0f, 1.0f);
-        for (const AZ::u32 topEdge : { 4u, 5u, 6u, 7u })
-        {
-            debugDisplay.DrawLine(
-                worldTransform.TransformPoint(BoxCorner(halfExtents, BoxEdges[topEdge][0])),
-                worldTransform.TransformPoint(BoxCorner(halfExtents, BoxEdges[topEdge][1])), surfaceColor, surfaceColor);
-        }
+        DrawWaterVolume(debugDisplay, worldTransform, m_dimensions);
     }
 
 } // namespace JoltBuoyancy

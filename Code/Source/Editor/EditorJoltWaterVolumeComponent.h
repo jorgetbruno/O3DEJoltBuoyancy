@@ -36,5 +36,6 @@ namespace JoltBuoyancy
 
         AZ::Vector3 m_dimensions = AZ::Vector3(10.0f, 10.0f, 5.0f);
         JoltWaterVolumeSettings m_settings;
+        bool m_visible = true;
     };
 } // namespace JoltBuoyancy

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <AzCore/Component/Component.h>
+#include <AzCore/Component/TickBus.h>
 #include <AzCore/Component/TransformBus.h>
 
 #include <AzFramework/Physics/Common/PhysicsTypes.h>
@@ -16,6 +17,7 @@ namespace JoltBuoyancy
     class JoltWaterVolumeComponent
         : public AZ::Component
         , private AZ::TransformNotificationBus::Handler
+        , private AZ::TickBus::Handler
         , private JoltWaterVolumeRequestBus::Handler
     {
     public:
@@ -35,6 +37,10 @@ namespace JoltBuoyancy
         {
             return m_settings;
         }
+        bool& GetVisible()
+        {
+            return m_visible;
+        }
 
     protected:
         // AZ::Component
@@ -43,6 +49,9 @@ namespace JoltBuoyancy
 
         // AZ::TransformNotificationBus
         void OnTransformChanged(const AZ::Transform& local, const AZ::Transform& world) override;
+
+        // AZ::TickBus
+        void OnTick(float deltaTime, AZ::ScriptTimePoint time) override;
 
         // JoltWaterVolumeRequestBus
         void SetFluidDensity(float density) override;
@@ -62,6 +71,10 @@ namespace JoltBuoyancy
 
         AZ::Vector3 m_dimensions = AZ::Vector3(10.0f, 10.0f, 5.0f);
         JoltWaterVolumeSettings m_settings;
+        bool m_visible = true;
+
+        //! Kept in step with the volume so drawing needs no per-frame transform query.
+        AZ::Transform m_worldTransform = AZ::Transform::CreateIdentity();
 
         JoltWaterVolume m_waterVolume;
         AzPhysics::SceneHandle m_attachedSceneHandle = AzPhysics::InvalidSceneHandle;

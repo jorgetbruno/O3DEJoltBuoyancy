@@ -3,7 +3,10 @@
 #include <AzCore/Serialization/EditContext.h>
 #include <AzCore/Serialization/SerializeContext.h>
 
+#include <AzFramework/Entity/EntityDebugDisplayBus.h>
 #include <AzFramework/Physics/SystemBus.h>
+
+#include <Clients/JoltWaterVolumeRender.h>
 
 namespace JoltBuoyancy
 {
@@ -20,9 +23,10 @@ namespace JoltBuoyancy
                 ;
 
             serializeContext->Class<JoltWaterVolumeComponent, AZ::Component>()
-                ->Version(1)
+                ->Version(2)
                 ->Field("Dimensions", &JoltWaterVolumeComponent::m_dimensions)
                 ->Field("Settings", &JoltWaterVolumeComponent::m_settings)
+                ->Field("Visible", &JoltWaterVolumeComponent::m_visible)
                 ;
 
             if (AZ::EditContext* editContext = serializeContext->GetEditContext())
@@ -57,6 +61,9 @@ namespace JoltBuoyancy
                         ->Attribute(AZ::Edit::Attributes::Suffix, " m")
                     ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeComponent::m_settings,
                         "Water", "Fluid properties")
+                    ->DataElement(AZ::Edit::UIHandlers::CheckBox, &JoltWaterVolumeComponent::m_visible,
+                        "Visible", "Draw the water as a translucent box. There is no water mesh or material: this "
+                        "drawing is the volume itself, so it always matches what the solver uses.")
                     ;
             }
         }
@@ -88,10 +95,15 @@ namespace JoltBuoyancy
 
         AZ::TransformNotificationBus::Handler::BusConnect(GetEntityId());
         JoltWaterVolumeRequestBus::Handler::BusConnect(GetEntityId());
+
+        // Connected regardless of m_visible so the volume can be shown and hidden at
+        // runtime; OnTick returns immediately when it is off.
+        AZ::TickBus::Handler::BusConnect();
     }
 
     void JoltWaterVolumeComponent::Deactivate()
     {
+        AZ::TickBus::Handler::BusDisconnect();
         JoltWaterVolumeRequestBus::Handler::BusDisconnect();
         AZ::TransformNotificationBus::Handler::BusDisconnect();
 
@@ -103,12 +115,32 @@ namespace JoltBuoyancy
     {
         AZ::Transform worldTransform = AZ::Transform::CreateIdentity();
         AZ::TransformBus::EventResult(worldTransform, GetEntityId(), &AZ::TransformBus::Events::GetWorldTM);
+        m_worldTransform = worldTransform;
         m_waterVolume.SetVolume(worldTransform, m_dimensions);
     }
 
     void JoltWaterVolumeComponent::OnTransformChanged(const AZ::Transform& /*local*/, const AZ::Transform& world)
     {
+        m_worldTransform = world;
         m_waterVolume.SetVolume(world, m_dimensions);
+    }
+
+    void JoltWaterVolumeComponent::OnTick(float /*deltaTime*/, AZ::ScriptTimePoint /*time*/)
+    {
+        if (!m_visible)
+        {
+            return;
+        }
+
+        // Bound per frame rather than cached: the viewport's debug display handler is
+        // not guaranteed to exist when the component activates, and this is a hash
+        // lookup against a frame of rendering.
+        AzFramework::DebugDisplayRequestBus::BusPtr debugDisplayBus;
+        AzFramework::DebugDisplayRequestBus::Bind(debugDisplayBus, AzFramework::g_defaultSceneEntityDebugDisplayId);
+        if (auto* debugDisplay = AzFramework::DebugDisplayRequestBus::FindFirstHandler(debugDisplayBus))
+        {
+            DrawWaterVolume(*debugDisplay, m_worldTransform, m_dimensions);
+        }
     }
 
     void JoltWaterVolumeComponent::SetFluidDensity(float density)
