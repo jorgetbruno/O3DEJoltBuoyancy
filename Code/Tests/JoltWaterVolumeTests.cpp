@@ -1,6 +1,7 @@
 #include <AzTest/AzTest.h>
 #include <AzCore/UnitTest/TestTypes.h>
 
+#include <Clients/JoltBuoyancyAllocator.h>
 #include <Clients/JoltWaterVolume.h>
 
 #include <Jolt/Jolt.h>
@@ -76,7 +77,11 @@ namespace JoltBuoyancy
     protected:
         void SetUp() override
         {
-            JPH::RegisterDefaultAllocator();
+            // The same installer the gem's modules use, rather than
+            // JPH::RegisterDefaultAllocator: the tests previously registered malloc/free
+            // here and so never exercised - or noticed the absence of - the gem's own
+            // hooks. See JoltBuoyancyAllocator.h.
+            JoltBuoyancyAllocator::Install();
             JPH::Factory::sInstance = new JPH::Factory();
             JPH::RegisterTypes();
 
@@ -255,6 +260,25 @@ namespace JoltBuoyancy
     {
         EXPECT_FALSE(m_waterVolume.AttachToPhysicsSystem(nullptr));
         EXPECT_FALSE(m_waterVolume.IsAttached());
+    }
+
+    TEST_F(JoltWaterVolumeTests, AttachingAllocatesThroughThisModulesJoltHooks)
+    {
+        // Attaching grows PhysicsSystem::mStepListeners, and that Array is reallocated
+        // by the copy of Jolt linked into whichever module called AddStepListener. With
+        // the hooks left null - the state every module starts in - this is a call to
+        // address zero, which is how the Editor crashed on entering game mode.
+        //
+        // Only an omission *in this module* is caught here; a module that never calls
+        // Install still crashes, so keep the call in every module entry point.
+        ASSERT_NE(JPH::Reallocate, nullptr);
+        ASSERT_NE(JPH::Allocate, nullptr);
+        ASSERT_NE(JPH::Free, nullptr);
+        ASSERT_NE(JPH::AlignedAllocate, nullptr);
+        ASSERT_NE(JPH::AlignedFree, nullptr);
+
+        EXPECT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+        m_waterVolume.Detach();
     }
 
 } // namespace JoltBuoyancy

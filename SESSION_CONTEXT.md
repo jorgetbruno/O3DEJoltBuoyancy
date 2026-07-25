@@ -141,38 +141,69 @@ editor/runtime split.
 
 ## Status: verified vs not
 
-**Verified:** both gems and the editor modules compile; JoltBuoyancy 7/7 and
+**Verified:** both gems and the editor modules compile; JoltBuoyancy 8/8 and
 JoltPhysics 128/128 pass; the level prefab is valid JSON with all 8 entities,
 the right editor component types and the masses written; both gems enabled in
-the project.
+the project. After the allocator fix, `JoltPhysicsTest.GameLauncher.exe
++LoadLevel levels/buoyancy/buoyancy.spawnable -rhi=null` loads the level,
+activates its entities and simulates for 30 s with no crash and no dump — which
+exercises the exact `Activate` → `AddStepListener` path that was crashing.
 
-**Not verified:** the level has **never been opened or run in the Editor**. The
-physics behaviour is predicted from unit tests against a real Jolt world, not
-observed in this level.
+**Not verified:** the level has still not been opened in the **Editor** since
+the fix (the launcher run above covers the runtime module; the editor module got
+the identical fix but has not been run). And the buoyancy *behaviour* — what
+actually floats where in this level — has never been observed anywhere; it is
+predicted from unit tests against a real Jolt world.
 
-## If the Editor crashed on the buoyancy level
+## The Editor crash on entering game mode — found and fixed
 
-That was not reproduced or investigated. Start here:
+Symptom: `Levels/SmokeBox` ran fine, `Levels/Buoyancy` crashed the moment you
+enabled simulation or pressed play.
 
-1. Confirm the crash is buoyancy-related at all: open `Levels/SmokeBox` first.
-   If that also crashes, the cause is elsewhere (the physics gem had a large
-   collision-filtering refactor in `088d201`, and this project's `MainLevel`
-   still uses pre-split runtime components).
-2. The most suspicious thing in this gem is the step listener. `OnStep` runs on
-   Jolt's job threads with body mutexes held; anything that takes a body lock
-   there deadlocks, and a stale `m_physicsSystem` after a scene teardown would
-   crash. Check `Deactivate` ordering — the component detaches the volume, but a
-   scene removed while a volume is still attached has not been exercised.
-3. `JoltWaterVolumeComponent::Activate` resolves the default scene via
-   `Physics::DefaultWorldBus`. In the Editor the scene may not exist yet when
-   the component activates, in which case `Attach` returns false and the volume
-   silently does nothing — that would be a "does not work" symptom rather than a
-   crash, but it is untested in-editor either way.
-4. Editor logs are under `JoltPhysicsTest\user\log\`.
+**Cause: each module gets its own copy of Jolt's allocation hooks, and this
+gem never filled its own in.** Jolt allocates through five global function
+pointers (`JPH::Allocate`, `Reallocate`, `Free`, `AlignedAllocate`,
+`AlignedFree`). Jolt is statically linked into every module that uses it, so
+each module owns its own copy and they start null. The physics gem installs
+*its* copy in `JoltAllocator::Install`; that does nothing for this gem. Any Jolt
+code the linker resolved locally — `PhysicsSystem::AddStepListener`, and the
+header-only collision collectors in `OnStep` — then allocates through a null
+pointer.
+
+Entering game mode activated `JoltWaterVolumeComponent`, which called
+`AddStepListener`, whose `mStepListeners.push_back` called
+`JPH::Reallocate(nullptr, 0, 8)` — a jump to address 0.
+
+Fix: `Source/Clients/JoltBuoyancyAllocator.{h,cpp}`, installed from the first
+line of both `JoltBuoyancyModule` and `JoltBuoyancyEditorModule`. The hooks
+forward to `AZ::SystemAllocator`, deliberately identical to the physics gem's,
+because the allocations cross the module boundary: this module's
+`AddStepListener` grows the array and the physics gem's `~PhysicsSystem` frees
+it. `JPH::RegisterDefaultAllocator` would compile and run but routes to
+malloc/free, handing the physics gem a block `AZ::SystemAllocator` never issued.
+
+Why 7 passing tests missed it: the test module called
+`JPH::RegisterDefaultAllocator()` in its own `SetUp`, so *its* copy of the
+pointers was always valid. The tests now call `JoltBuoyancyAllocator::Install()`
+instead, so there is one allocator story. Note the structural limit — a module
+that forgets to call `Install` still crashes, and no unit test in another module
+can catch that. Keep the call in every module entry point.
+
+**Reading a crash dump without a debugger.** No `cdb`/WinDbg is installed and
+O3DE's own `error.log` stack was useless (only the exception-filter frames), and
+its "Attempt to write data to address 0x00000000" was wrong — the exception
+parameters say `8`, an *execute* fault. `scratchpad/dmp2.py`-style minidump
+parsing plus `dbghelp` via `ctypes` against `build\windows\bin\profile\*.pdb`
+gave the real frames. Note the O3DE minidump's `CONTEXT` is at exception-stream
+offset **160**, not 168.
 
 ## Reasonable next steps
 
 - Open the level in the Editor and confirm the behaviour (the real gap).
+- Any *future* extension gem that links Jolt hits the same allocator trap on its
+  first Jolt call. The durable fix would be for the physics gem to export its
+  installer from `JoltPhysics.API` so extension gems call one shared function
+  instead of each copying `JoltAllocator`; this gem duplicates it today.
 - Write an in-editor check for it. `JoltPhysicsTest\smoke_test.py` is the
   existing harness pattern for that.
 - The volume is an oriented box only. Sphere/mesh water and a proper surface

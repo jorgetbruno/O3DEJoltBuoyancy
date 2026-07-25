@@ -1,6 +1,7 @@
 #include <AzCore/Memory/SystemAllocator.h>
 #include <AzCore/Module/Module.h>
 
+#include <Clients/JoltBuoyancyAllocator.h>
 #include <Clients/JoltWaterVolumeComponent.h>
 #include <Editor/EditorJoltWaterVolumeComponent.h>
 
@@ -14,6 +15,12 @@ namespace JoltBuoyancy
 
         JoltBuoyancyEditorModule()
         {
+            // The editor module links its own copy of Jolt, so it needs its own hooks
+            // installed just as the runtime module does. Entering game mode activates
+            // the runtime component from *this* module, and that is where the null
+            // JPH::Reallocate crashed. See JoltBuoyancyAllocator.h.
+            JoltBuoyancyAllocator::Install();
+
             m_descriptors.insert(
                 m_descriptors.end(),
                 {

@@ -1,6 +1,7 @@
 #include <AzCore/Memory/SystemAllocator.h>
 #include <AzCore/Module/Module.h>
 
+#include <Clients/JoltBuoyancyAllocator.h>
 #include <Clients/JoltWaterVolumeComponent.h>
 
 namespace JoltBuoyancy
@@ -13,6 +14,10 @@ namespace JoltBuoyancy
 
         JoltBuoyancyModule()
         {
+            // Before any Jolt code in this module runs: its allocation hooks are its
+            // own, and start null. See JoltBuoyancyAllocator.h.
+            JoltBuoyancyAllocator::Install();
+
             m_descriptors.insert(
                 m_descriptors.end(),
                 {
