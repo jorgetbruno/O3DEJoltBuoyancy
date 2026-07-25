@@ -210,7 +210,18 @@ offset **160**, not 168.
   from Atom's water rendering are unimplemented.
 - Overlapping volumes both apply impulses to the same body ("double buoyancy").
   Not guarded, documented only here.
-- Soft bodies are the other extension gem discussed. Jolt 5.5.0 has
-  `Physics/SoftBody/*`, but they would need a body-adoption API in the physics
-  gem so soft bodies get scene handles and collision events. **Hair does not
-  exist in Jolt 5.5.0** — that needs a Jolt upgrade first.
+- Soft bodies are **done, and they live inside the JoltPhysics gem**, not in an
+  extension gem. The "body-adoption API" this section used to call a blocker was
+  not one: `BodyInterface::CreateAndAddSoftBody` exists, so a soft body is an
+  ordinary Jolt body and collides with rigid bodies today. Scene handles and
+  collision events are still missing, which is exactly why it belongs inside the
+  gem — see `Gems/JoltSoftBody/MIGRATED.md` for the reasoning and the file map.
+  Test level: `Levels/SoftBody`, from `gen_softbody_level.py`.
+- The dividing line that came out of it: a feature that **owns bodies** belongs
+  in the physics gem, one that only **perturbs bodies someone else owns** can be
+  an extension gem. Buoyancy is the second kind and correctly stays separate.
+- **Hair does not exist in Jolt 5.5.0** — that still needs a Jolt upgrade first.
+- The physics gem logs a pile of `duplicated Uuid` asserts at startup
+  (`EditorJoltColliderComponentBase`, most joint configurations). Pre-existing,
+  not investigated, and harmless as far as anything here shows — but they make a
+  real assert easy to miss in the noise.
