@@ -20,7 +20,7 @@
     ],
     "platforms": [],
     "icon_path": "preview.png",
-    "requirements": "Requires the JoltPhysics gem to be enabled. It has no effect with any other physics backend.",
+    "requirements": "Requires the JoltPhysics gem (https://github.com/jorgetbruno/JoltPhysics) to be enabled. It has no effect with any other physics backend.",
     "documentation_url": "https://jrouwe.github.io/JoltPhysics/",
     "dependencies": [
         "JoltPhysics"

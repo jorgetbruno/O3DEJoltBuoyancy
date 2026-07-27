@@ -146,14 +146,14 @@ would end up exactly where it does. Bodies are 1 m³ boxes, so mass *is* density
 
 ## Status
 
-**Verified:** the gem and its editor module build; 8/8 unit tests pass against a real
-Jolt world; the level prefab is valid with the right editor components and masses; the
-game launcher loads the level and simulates it for 30 s with no crash, exercising the
-`Activate` → `AddStepListener` path that used to crash.
+**Observed in the editor (2026-07-26):** bodies float. The pool lane behaves as the unit
+tests predict — this is the confirmation the notes this file replaced were still waiting
+on, and it closes the last gap between "the maths is right" and "the feature works".
 
-**Not verified:** the buoyancy *behaviour* — what actually floats where in that level —
-has not been observed in the editor. It is predicted from unit tests against a real Jolt
-world, which is good evidence but not the same thing.
+**Also verified:** the gem and its editor module build; 8/8 unit tests pass against a
+real Jolt world; the level prefab is valid with the right editor components and masses;
+the game launcher loads the level and simulates it for 30 s with no crash, exercising
+the `Activate` → `AddStepListener` path that used to crash.
 
 ## License
 
