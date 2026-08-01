@@ -17,7 +17,16 @@ namespace JoltBuoyancy
 {
     void EditorJoltWaterVolumeComponent::Reflect(AZ::ReflectContext* context)
     {
-        AzToolsFramework::ComponentModeFramework::ComponentModeDelegate::Reflect(context);
+        // AzToolsFramework's delegate is reflected by whichever gem reaches it first, and
+        // the physics gem's colliders already do. Registering it again is a duplicated-Uuid
+        // error, which is easy to miss in the noise at editor startup.
+        if (auto* serializeContext = azrtti_cast<AZ::SerializeContext*>(context);
+            serializeContext &&
+            serializeContext->FindClassData(
+                azrtti_typeid<AzToolsFramework::ComponentModeFramework::ComponentModeDelegate>()) == nullptr)
+        {
+            AzToolsFramework::ComponentModeFramework::ComponentModeDelegate::Reflect(context);
+        }
 
         if (auto* serializeContext = azrtti_cast<AZ::SerializeContext*>(context))
         {

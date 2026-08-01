@@ -137,11 +137,56 @@ internally but does not hand it back), and the gameplay queries `IsPointUnderwat
 `GetSurfacePositionAt`, `GetSurfaceNormalAt` and `GetDepthAt`.
 
 Everything is reflected to the **BehaviorContext**, so Lua and Script Canvas can change
-water and hear about splashes. `JoltBuoyancyScriptReflectionTests` pins that, the way the
-physics gem pins its own gameplay buses.
+water and hear about splashes. See *Scripting* below.
 
 A volume attaches to the default scene unless a scene name is authored, and its enabled
 state is serialized, so a level can hold water that starts switched off.
+
+## Scripting
+
+`Assets/Scripts/WaterSplash.lua` is a working example: attach it to a water volume entity
+with the **Lua Script** component and it reacts to bodies entering and leaving.
+
+```lua
+function WaterSplash:OnActivate()
+    self.waterHandler = JoltWaterVolumeNotificationBus.Connect(self, self.entityId)
+end
+
+function WaterSplash:OnBodyEnteredWater(bodyEntityId, speed)
+    if speed >= self.Properties.MinimumSplashSpeed then
+        -- spawn a splash
+    end
+end
+```
+
+The notification bus is addressed by the **water volume's** entity, so `self.entityId` is
+the right address when the script sits on the volume. Both callbacks are raised after the
+physics step, never from inside it, so a handler may spawn effects or touch the body it
+was handed.
+
+Requests work the same way:
+
+```lua
+JoltWaterVolumeRequestBus.Event.SetWavesEnabled(self.entityId, true)
+JoltBuoyancyOverrideRequestBus.Event.SetBuoyancyMode(boatId, JoltBuoyancyMode_Explicit)
+JoltBuoyancyOverrideRequestBus.Event.SetBuoyancyFactor(boatId, 2.0)
+local wet = JoltWaterVolumeRequestBus.Event.IsPointUnderwater(self.entityId, somePoint)
+```
+
+One trap worth knowing: **`EntityId(1234)` does not work in Lua.** The numeric constructor
+is not reflected, and it quietly yields an invalid id rather than failing, so a bus call
+made with one silently goes nowhere. Get ids the normal way - `self.entityId`, a component
+property, or something handed to you by a callback.
+
+`JoltBuoyancyLuaTests` runs real Lua against the real behavior context: driving an
+override, reading values back, and receiving a splash in a Lua handler. That is a
+stronger check than `JoltBuoyancyScriptReflectionTests`, which only proves the buses are
+*listed* - an event can be reflected under a name script cannot call, or take a type
+script cannot construct, and still appear in the registry.
+
+**Script Canvas is not covered.** The same reflection is what Script Canvas nodes are
+generated from, so the buses should appear there, but nothing here has been opened in the
+Script Canvas editor and no graph has been run.
 
 ## Building and testing
 
@@ -154,7 +199,7 @@ cmd /c "C:\Users\jorge\O3DE\Projects\JoltPhysicsTest\build-env.cmd cmake --build
 
 ```
 cd build\windows\bin\profile
-.\AzTestRunner.exe JoltBuoyancy.Tests.dll AzRunUnitTests    # 39 tests
+.\AzTestRunner.exe JoltBuoyancy.Tests.dll AzRunUnitTests    # 44 tests
 ```
 
 Check the process exit code, not the console text.
@@ -222,7 +267,7 @@ would end up exactly where it does. Bodies are 1 m³ boxes, so mass *is* density
 tests predict — this is the confirmation the notes this file replaced were still waiting
 on, and it closes the last gap between "the maths is right" and "the feature works".
 
-**Also verified:** the gem and its editor module build; 39/39 unit tests pass against a
+**Also verified:** the gem and its editor module build; 44/44 unit tests pass against a
 real Jolt world; the level prefab is valid with the right editor components and masses;
 the game launcher loads the level and simulates it for 30 s with no crash, exercising
 the `Activate` → `AddStepListener` path that used to crash.
