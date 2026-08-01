@@ -1,5 +1,6 @@
 #include <Clients/JoltWaterVolume.h>
 
+#include <AzCore/Console/IConsole.h>
 #include <AzCore/Interface/Interface.h>
 #include <AzCore/Math/MathUtils.h>
 #include <AzCore/std/parallel/lock.h>
@@ -17,12 +18,40 @@
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseQuery.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
+#include <Jolt/Physics/Collision/Shape/Shape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 
 namespace JoltBuoyancy
 {
     namespace
     {
+        //! Jolt's own diagnostic for buoyancy: it draws the slice of each shape that is
+        //! under the surface, the centre of buoyancy, and the submerged volume. Far more
+        //! informative than the translucent box when a body floats at the wrong height,
+        //! because it shows what the solver thinks is wet rather than where the water is.
+        //!
+        //! A static inside Jolt, so it needs the debug renderer compiled in - profile and
+        //! debug builds have it, release does not.
+        //! Out of line because a preprocessor conditional cannot sit inside a macro
+        //! invocation, and AZ_CVAR takes the handler as an argument.
+        void SetDrawSubmergedVolumes([[maybe_unused]] bool enabled)
+        {
+#ifdef JPH_DEBUG_RENDERER
+            JPH::Shape::sDrawSubmergedVolumes = enabled;
+#else
+            AZ_Warning("JoltBuoyancy", !enabled,
+                "jolt_DebugSubmergedVolumes needs a build with Jolt's debug renderer, which release does not have.");
+#endif
+        }
+
+        AZ_CVAR(bool, jolt_DebugSubmergedVolumes, false,
+            [](const bool& enabled)
+            {
+                SetDrawSubmergedVolumes(enabled);
+            },
+            AZ::ConsoleFunctorFlags::Null,
+            "Draw the submerged part of each shape, its centre of buoyancy and its submerged volume.");
+
         JPH::Vec3 ToJolt(const AZ::Vector3& v)
         {
             return JPH::Vec3(v.GetX(), v.GetY(), v.GetZ());
