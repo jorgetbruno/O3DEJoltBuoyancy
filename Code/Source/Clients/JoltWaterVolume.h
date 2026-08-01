@@ -6,12 +6,14 @@
 #include <AzCore/Memory/SystemAllocator.h>
 #include <AzCore/RTTI/RTTI.h>
 #include <AzCore/RTTI/TypeInfo.h>
+#include <AzCore/std/containers/vector.h>
 #include <AzCore/std/parallel/atomic.h>
 #include <AzCore/std/parallel/mutex.h>
 
 #include <AzFramework/Physics/Common/PhysicsTypes.h>
 
 #include <Jolt/Jolt.h>
+#include <Jolt/Physics/Body/BodyID.h>
 #include <Jolt/Physics/PhysicsStepListener.h>
 
 namespace JPH
@@ -34,6 +36,26 @@ namespace JoltBuoyancy
         AZ::Vector3 m_fluidVelocity = AZ::Vector3::CreateZero();
     };
 
+    //! An immutable copy of a volume's placement, taken under its mutex so that one volume
+    //! can read another's without racing gameplay writes.
+    struct JoltWaterVolumeSnapshot
+    {
+        AZ::Transform m_worldTransform = AZ::Transform::CreateIdentity();
+        AZ::Vector3 m_dimensions = AZ::Vector3::CreateZero();
+        AZ::Aabb m_worldBounds = AZ::Aabb::CreateNull();
+        bool m_enabled = false;
+        //! Identity only, for breaking ties between volumes with equal submersion depth.
+        const void* m_owner = nullptr;
+
+        //! Whether a world-space point lies inside the oriented box.
+        bool Contains(const AZ::Vector3& worldPoint) const;
+
+        //! How far the point sits below this volume's surface plane, along the surface
+        //! normal. Negative above the surface. Defined for a tilted volume too, which is
+        //! why it is a plane distance rather than a difference of Z coordinates.
+        float SubmersionDepth(const AZ::Vector3& worldPoint) const;
+    };
+
     //! Applies Jolt's buoyancy impulses to every dynamic body overlapping a box of water,
     //! once per physics step.
     //!
@@ -41,6 +63,8 @@ namespace JoltBuoyancy
     //! lands inside the step it belongs to, at the same delta time the solver is about to
     //! integrate. Jolt calls step listeners with every body mutex already held, so the
     //! bodies are reached through the no-lock interface and none are added or removed.
+    //! Jolt also runs step listeners on several jobs at once, so anything shared between
+    //! volumes has to be safe to touch concurrently.
     class JoltWaterVolume final : public JPH::PhysicsStepListener
     {
     public:
@@ -68,10 +92,7 @@ namespace JoltBuoyancy
         void SetSettings(const JoltWaterVolumeSettings& settings);
         JoltWaterVolumeSettings GetSettings() const;
 
-        void SetEnabled(bool enabled)
-        {
-            m_enabled.store(enabled, AZStd::memory_order_relaxed);
-        }
+        void SetEnabled(bool enabled);
         bool IsEnabled() const
         {
             return m_enabled.load(AZStd::memory_order_relaxed);
@@ -84,10 +105,32 @@ namespace JoltBuoyancy
             return m_submergedBodyCount.load(AZStd::memory_order_relaxed);
         }
 
+        //! Wakes bodies that OnStep found asleep inside a volume that had just moved,
+        //! resized or changed settings.
+        //!
+        //! **Must be called outside the physics step.** Waking a body takes its mutex, and
+        //! every body mutex is already held during the step, so doing this from OnStep
+        //! would deadlock - which is why OnStep only queues the ids. The component calls
+        //! this from the scene's simulation-finish event.
+        //!
+        //! Without it a sleeping body ignores water that arrives after it settled: a rising
+        //! level or a moving volume slides over it and nothing ever wakes it, because
+        //! ApplyBuoyancyImpulse does not. Bodies asleep under water that has not changed are
+        //! deliberately left alone - they are in equilibrium, and waking them every step
+        //! would stop anything from ever sleeping.
+        void WakePendingBodies();
+
+        //! Placement copied under the mutex, for peer volumes and for tests.
+        JoltWaterVolumeSnapshot GetSnapshot() const;
+
         // JPH::PhysicsStepListener
         void OnStep(const JPH::PhysicsStepListenerContext& inContext) override;
 
     private:
+        //! Bumped whenever the water itself changes, so OnStep can tell "the body settled
+        //! in water that has not moved since" from "the water just changed under it".
+        void BumpGeneration();
+
         JPH::PhysicsSystem* m_physicsSystem = nullptr;
 
         //! Guards the volume and settings, which gameplay writes and OnStep reads.
@@ -100,5 +143,14 @@ namespace JoltBuoyancy
 
         AZStd::atomic<bool> m_enabled{ true };
         AZStd::atomic<int> m_submergedBodyCount{ 0 };
+
+        AZStd::atomic<AZ::u32> m_generation{ 1 };
+        //! The generation the last wake pass covered. Only read and written in OnStep.
+        AZ::u32 m_wakeGeneration = 0;
+
+        //! Ids queued by OnStep for WakePendingBodies. Its own mutex, because OnStep runs
+        //! on a job thread while the wake happens on the main thread.
+        AZStd::mutex m_pendingWakeMutex;
+        AZStd::vector<JPH::BodyID> m_pendingWake;
     };
 } // namespace JoltBuoyancy

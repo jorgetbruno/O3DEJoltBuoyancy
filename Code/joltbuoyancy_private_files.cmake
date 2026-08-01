@@ -5,6 +5,8 @@ set(FILES
     Source/Clients/JoltWaterVolume.h
     Source/Clients/JoltWaterVolumeComponent.cpp
     Source/Clients/JoltWaterVolumeComponent.h
+    Source/Clients/JoltWaterVolumeRegistry.cpp
+    Source/Clients/JoltWaterVolumeRegistry.h
     Source/Clients/JoltWaterVolumeRender.cpp
     Source/Clients/JoltWaterVolumeRender.h
 )

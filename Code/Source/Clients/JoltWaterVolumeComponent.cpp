@@ -3,7 +3,10 @@
 #include <AzCore/Serialization/EditContext.h>
 #include <AzCore/Serialization/SerializeContext.h>
 
+#include <AzCore/Interface/Interface.h>
+
 #include <AzFramework/Entity/EntityDebugDisplayBus.h>
+#include <AzFramework/Physics/PhysicsScene.h>
 #include <AzFramework/Physics/SystemBus.h>
 
 #include <Clients/JoltWaterVolumeRender.h>
@@ -93,6 +96,19 @@ namespace JoltBuoyancy
         RefreshVolume();
         m_waterVolume.Attach(m_attachedSceneHandle);
 
+        // Bodies the step found asleep inside changed water are woken here rather than in
+        // OnStep, where every body mutex is held and waking would deadlock.
+        m_simulationFinishHandler = AzPhysics::SceneEvents::OnSceneSimulationFinishHandler(
+            [this]([[maybe_unused]] AzPhysics::SceneHandle sceneHandle, [[maybe_unused]] float fixedDeltaTime)
+            {
+                m_waterVolume.WakePendingBodies();
+            });
+        if (auto* sceneInterface = AZ::Interface<AzPhysics::SceneInterface>::Get();
+            sceneInterface && m_attachedSceneHandle != AzPhysics::InvalidSceneHandle)
+        {
+            sceneInterface->RegisterSceneSimulationFinishHandler(m_attachedSceneHandle, m_simulationFinishHandler);
+        }
+
         AZ::TransformNotificationBus::Handler::BusConnect(GetEntityId());
         JoltWaterVolumeRequestBus::Handler::BusConnect(GetEntityId());
 
@@ -107,6 +123,7 @@ namespace JoltBuoyancy
         JoltWaterVolumeRequestBus::Handler::BusDisconnect();
         AZ::TransformNotificationBus::Handler::BusDisconnect();
 
+        m_simulationFinishHandler.Disconnect();
         m_waterVolume.Detach();
         m_attachedSceneHandle = AzPhysics::InvalidSceneHandle;
     }

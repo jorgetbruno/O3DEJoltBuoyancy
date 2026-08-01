@@ -131,7 +131,62 @@ namespace JoltBuoyancy
             for (int i = 0; i < steps; ++i)
             {
                 m_physicsSystem->Update(fixedDeltaTime, 1, m_tempAllocator.get(), m_jobSystem.get());
+
+                // Standing in for the component's scene simulation-finish handler: bodies
+                // the step found asleep can only be woken once the step has released the
+                // body mutexes.
+                m_waterVolume.WakePendingBodies();
+                for (JoltWaterVolume* volume : m_extraVolumes)
+                {
+                    volume->WakePendingBodies();
+                }
             }
+        }
+
+        bool IsBodyAsleep(const JPH::BodyID& bodyId) const
+        {
+            return !m_physicsSystem->GetBodyInterface().IsActive(bodyId);
+        }
+
+        //! A static floor whose top surface sits at the given height.
+        void CreateFloor(float topZ = 0.0f)
+        {
+            JPH::BodyCreationSettings settings(
+                new JPH::BoxShape(JPH::Vec3(50.0f, 50.0f, 0.5f)), JPH::RVec3(0.0f, 0.0f, topZ - 0.5f),
+                JPH::Quat::sIdentity(), JPH::EMotionType::Static, TestObjectLayers::NonMoving);
+            m_physicsSystem->GetBodyInterface().CreateAndAddBody(settings, JPH::EActivation::DontActivate);
+        }
+
+        AZ::Vector3 GetBodyPosition(const JPH::BodyID& bodyId) const
+        {
+            const JPH::RVec3 position = m_physicsSystem->GetBodyInterface().GetPosition(bodyId);
+            return AZ::Vector3(
+                static_cast<float>(position.GetX()), static_cast<float>(position.GetY()),
+                static_cast<float>(position.GetZ()));
+        }
+
+        //! A second 1 m cube at an arbitrary position, for the tests that need two.
+        JPH::BodyID CreateCubeAt(float mass, const AZ::Vector3& position)
+        {
+            JPH::BodyCreationSettings settings(
+                new JPH::BoxShape(JPH::Vec3(0.5f, 0.5f, 0.5f)),
+                JPH::RVec3(position.GetX(), position.GetY(), position.GetZ()), JPH::Quat::sIdentity(),
+                JPH::EMotionType::Dynamic, TestObjectLayers::Moving);
+            settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+            settings.mMassPropertiesOverride.mMass = mass;
+            return m_physicsSystem->GetBodyInterface().CreateAndAddBody(settings, JPH::EActivation::Activate);
+        }
+
+        //! Where the volume's surface plane sits, in world Z, above a given column. Solves
+        //! the plane rather than reading a height, so it stays right for a tilted volume.
+        static float SurfaceHeightAt(const JoltWaterVolumeSnapshot& snapshot, float x, float y)
+        {
+            const AZ::Vector3 normal =
+                snapshot.m_worldTransform.TransformVector(AZ::Vector3::CreateAxisZ()).GetNormalizedSafe();
+            const AZ::Vector3 pointOnSurface = snapshot.m_worldTransform.TransformPoint(
+                AZ::Vector3(0.0f, 0.0f, snapshot.m_dimensions.GetZ() * 0.5f));
+            return pointOnSurface.GetZ() -
+                (normal.GetX() * (x - pointOnSurface.GetX()) + normal.GetY() * (y - pointOnSurface.GetY())) / normal.GetZ();
         }
 
         float GetBodyZ(const JPH::BodyID& bodyId) const
@@ -158,6 +213,10 @@ namespace JoltBuoyancy
         AZStd::unique_ptr<JPH::JobSystemThreadPool> m_jobSystem;
         AZStd::unique_ptr<JPH::PhysicsSystem> m_physicsSystem;
         JoltWaterVolume m_waterVolume;
+
+        //! Additional volumes the overlap tests attach, pumped by Simulate alongside the
+        //! main one.
+        AZStd::vector<JoltWaterVolume*> m_extraVolumes;
     };
 
     TEST_F(JoltWaterVolumeTests, LightBodyFloatsAtTheSurface)
@@ -254,6 +313,157 @@ namespace JoltBuoyancy
 
         const float driftX = static_cast<float>(m_physicsSystem->GetBodyInterface().GetPosition(cube).GetX());
         EXPECT_GT(driftX, 1.0f);
+    }
+
+    TEST_F(JoltWaterVolumeTests, SleepingBodyWakesWhenTheWaterMovesOntoIt)
+    {
+        // The bug this pins: ApplyBuoyancyImpulse does not wake a sleeping body, and OnStep
+        // used to skip inactive bodies outright, so a rising level or a moving volume slid
+        // over anything that had already settled and never touched it again.
+        CreateFloor();
+        auto cube = CreateCube(200.0f, 0.6f); // light enough to float, dropped onto the floor
+
+        // Attached from the start, but sitting far below the floor so it touches nothing.
+        // The volume moving is what has to wake the body, not the volume appearing.
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        m_waterVolume.SetSettings(settings);
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -20.0f)), AZ::Vector3(50.0f, 50.0f, 5.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        // No water on it yet: it lands and goes to sleep.
+        Simulate(4.0f);
+        ASSERT_TRUE(IsBodyAsleep(cube));
+        const float sleepingZ = GetBodyZ(cube);
+
+        // Water rises over it, deep enough that a floating body would climb well clear.
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, 3.0f)), AZ::Vector3(50.0f, 50.0f, 6.0f));
+
+        Simulate(4.0f);
+
+        EXPECT_GT(GetBodyZ(cube), sleepingZ + 1.0f);
+        EXPECT_GT(m_waterVolume.GetSubmergedBodyCount(), 0);
+    }
+
+    TEST_F(JoltWaterVolumeTests, SleepingBodyIsLeftAloneWhileTheWaterDoesNotChange)
+    {
+        // The other half of the fix: waking sleepers unconditionally every step would keep
+        // every settled body permanently awake and stop anything sleeping at all.
+        CreateFloor();
+        CreateWater();
+        auto cube = CreateCube(3000.0f, 1.0f); // dense: sinks and rests on the floor
+
+        Simulate(6.0f);
+        ASSERT_TRUE(IsBodyAsleep(cube));
+
+        // Nothing about the water changes, so it must stay asleep.
+        Simulate(3.0f);
+        EXPECT_TRUE(IsBodyAsleep(cube));
+    }
+
+    TEST_F(JoltWaterVolumeTests, OverlappingVolumesDoNotDoubleTheImpulse)
+    {
+        // Two identical volumes over the same body used to apply two impulses, so a body
+        // denser than the fluid - which must sink - would float instead.
+        //
+        // The floor sits inside the water so the body settles while still submerged. Left
+        // to sink out of the bottom it would leave both volumes and report nothing.
+        CreateFloor(-4.0f);
+        CreateWater();
+
+        JoltWaterVolume secondVolume;
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        secondVolume.SetSettings(settings);
+        secondVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), AZ::Vector3(50.0f, 50.0f, 5.0f));
+        ASSERT_TRUE(secondVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+        m_extraVolumes.push_back(&secondVolume);
+
+        // 1500 kg/m^3 against 1000 kg/m^3 water: one impulse leaves it sinking to the
+        // floor, two would carry it back up to the surface.
+        auto cube = CreateCube(1500.0f, -0.5f);
+
+        // Sampled while it is still sinking. Once it settles on the floor it falls asleep,
+        // and a sleeping body is deliberately not counted as submerged by either volume.
+        Simulate(0.5f);
+        const int claimed = m_waterVolume.GetSubmergedBodyCount() + secondVolume.GetSubmergedBodyCount();
+        EXPECT_EQ(claimed, 1) << "exactly one of the two overlapping volumes should own the body";
+
+        Simulate(4.0f);
+
+        EXPECT_LT(GetBodyZ(cube), -3.0f) << "it should be resting on the floor inside the water";
+
+        secondVolume.Detach();
+        m_extraVolumes.clear();
+    }
+
+    TEST_F(JoltWaterVolumeTests, NonOverlappingVolumesEachKeepTheirOwnBodies)
+    {
+        // The overlap guard must not make a second volume stop working where the two do not
+        // actually overlap.
+        CreateWater();
+
+        JoltWaterVolume farVolume;
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        farVolume.SetSettings(settings);
+        farVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(200.0f, 0.0f, -2.5f)), AZ::Vector3(50.0f, 50.0f, 5.0f));
+        ASSERT_TRUE(farVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+        m_extraVolumes.push_back(&farVolume);
+
+        auto nearCube = CreateCube(200.0f, -3.0f);
+        auto farCube = CreateCubeAt(200.0f, AZ::Vector3(200.0f, 0.0f, -3.0f));
+
+        Simulate(5.0f);
+
+        EXPECT_GT(GetBodyZ(nearCube), -0.6f);
+        EXPECT_GT(GetBodyPosition(farCube).GetZ(), -0.6f);
+        EXPECT_EQ(m_waterVolume.GetSubmergedBodyCount(), 1);
+        EXPECT_EQ(farVolume.GetSubmergedBodyCount(), 1);
+
+        farVolume.Detach();
+        m_extraVolumes.clear();
+    }
+
+    TEST_F(JoltWaterVolumeTests, TiltedVolumeGivesATiltedSurface)
+    {
+        // The local +Z face is the surface, so rotating the volume is what makes a sloped
+        // river possible. Bodies should settle at the plane, not at a single world height.
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        m_waterVolume.SetSettings(settings);
+
+        const AZ::Transform tilted = AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)) *
+            AZ::Transform::CreateRotationY(AZ::DegToRad(15.0f));
+        m_waterVolume.SetVolume(tilted, AZ::Vector3(60.0f, 20.0f, 8.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        auto nearOrigin = CreateCubeAt(200.0f, AZ::Vector3(0.0f, 0.0f, -3.0f));
+        auto downSlope = CreateCubeAt(200.0f, AZ::Vector3(10.0f, 0.0f, -3.0f));
+
+        Simulate(6.0f);
+
+        // Buoyancy pushes along the surface normal, which on a tilted volume has a
+        // horizontal component, so a floating body slides downhill. Each is therefore
+        // checked against the surface above wherever it actually ended up, not where it
+        // started - the point being that the surface is a plane, not one world height.
+        const JoltWaterVolumeSnapshot snapshot = m_waterVolume.GetSnapshot();
+        const AZ::Vector3 nearOriginEnd = GetBodyPosition(nearOrigin);
+        const AZ::Vector3 downSlopeEnd = GetBodyPosition(downSlope);
+
+        const float expectedNearOrigin = SurfaceHeightAt(snapshot, nearOriginEnd.GetX(), nearOriginEnd.GetY());
+        const float expectedDownSlope = SurfaceHeightAt(snapshot, downSlopeEnd.GetX(), downSlopeEnd.GetY());
+
+        EXPECT_NEAR(nearOriginEnd.GetZ(), expectedNearOrigin, 0.8f);
+        EXPECT_NEAR(downSlopeEnd.GetZ(), expectedDownSlope, 0.8f);
+
+        // And the two really did settle at different world heights, which is the whole
+        // difference between a tilted surface and a flat one.
+        EXPECT_GT(AZStd::abs(nearOriginEnd.GetZ() - downSlopeEnd.GetZ()), 0.5f);
     }
 
     TEST_F(JoltWaterVolumeTests, AttachingToNothingFails)

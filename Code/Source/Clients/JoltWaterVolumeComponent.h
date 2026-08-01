@@ -4,6 +4,7 @@
 #include <AzCore/Component/TickBus.h>
 #include <AzCore/Component/TransformBus.h>
 
+#include <AzFramework/Physics/Common/PhysicsEvents.h>
 #include <AzFramework/Physics/Common/PhysicsTypes.h>
 
 #include <Clients/JoltWaterVolume.h>
@@ -78,5 +79,9 @@ namespace JoltBuoyancy
 
         JoltWaterVolume m_waterVolume;
         AzPhysics::SceneHandle m_attachedSceneHandle = AzPhysics::InvalidSceneHandle;
+
+        //! Fires after the step, with no body mutexes held, which is the only place bodies
+        //! the step found asleep can safely be woken.
+        AzPhysics::SceneEvents::OnSceneSimulationFinishHandler m_simulationFinishHandler;
     };
 } // namespace JoltBuoyancy
