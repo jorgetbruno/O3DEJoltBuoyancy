@@ -3,6 +3,7 @@
 
 #include <Clients/JoltBuoyancyAllocator.h>
 #include <Clients/JoltBuoyancyOverrideRegistry.h>
+#include <Clients/JoltGerstnerWaves.h>
 #include <Clients/JoltWaterVolume.h>
 
 #include <Jolt/Jolt.h>
@@ -1019,6 +1020,98 @@ namespace JoltBuoyancy
         EXPECT_GT(GetBodyPosition(withAddedMass).GetZ(), -1.5f);
 
         JoltBuoyancyOverrideRegistry::Get().Remove(heavyWater);
+    }
+
+    TEST_F(JoltWaterVolumeTests, APlaneVolumeHasNoFloor)
+    {
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        settings.m_shape = JoltWaterVolumeShape::Plane;
+        m_waterVolume.SetSettings(settings);
+        // Surface at z = 0, horizontal extent 100 m, nominal depth 10 m.
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -5.0f)), AZ::Vector3(100.0f, 100.0f, 10.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        const JoltWaterVolumeSnapshot snapshot = m_waterVolume.GetSnapshot();
+
+        // Inside the extent and below the surface is water, however deep. A box stops
+        // being water at its bottom face, which is wrong for open sea - a body that sinks
+        // out of it suddenly weighs its full dry weight again.
+        EXPECT_TRUE(snapshot.Contains(AZ::Vector3(0.0f, 0.0f, -2.0f)));
+        EXPECT_TRUE(snapshot.Contains(AZ::Vector3(0.0f, 0.0f, -500.0f))) << "a plane has no floor";
+        EXPECT_FALSE(snapshot.Contains(AZ::Vector3(0.0f, 0.0f, 2.0f))) << "above the surface is not water";
+        EXPECT_FALSE(snapshot.Contains(AZ::Vector3(200.0f, 0.0f, -2.0f))) << "outside the extent is not water";
+    }
+
+    TEST_F(JoltWaterVolumeTests, ShallowWaterShortensTheLongestWaves)
+    {
+        // w^2 = g k tanh(k d). Long waves feel the bottom first, slow and shorten, which is
+        // swell steepening as it runs into a beach.
+        JoltWaterSpectrum deep;
+        deep.m_beaufort = 6.0f;
+        deep.m_waterDepth = 0.0f;
+        JoltGerstnerWaves deepWaves;
+        deepWaves.Synthesise(deep);
+
+        JoltWaterSpectrum shallow = deep;
+        shallow.m_waterDepth = 3.0f;
+        JoltGerstnerWaves shallowWaves;
+        shallowWaves.Synthesise(shallow);
+
+        ASSERT_FALSE(deepWaves.IsEmpty());
+        ASSERT_EQ(deepWaves.GetComponents().size(), shallowWaves.GetComponents().size());
+
+        const auto longestWavelength = [](const JoltGerstnerWaves& waves)
+        {
+            float longest = 0.0f;
+            for (const JoltGerstnerComponent& component : waves.GetComponents())
+            {
+                longest = AZStd::max(longest, AZ::Constants::TwoPi / component.m_waveNumber);
+            }
+            return longest;
+        };
+
+        EXPECT_LT(longestWavelength(shallowWaves), longestWavelength(deepWaves));
+    }
+
+    TEST_F(JoltWaterVolumeTests, OverlappingVolumesBlendTheirCurrents)
+    {
+        // An estuary: a river current meeting still water. Ownership is all or nothing, so
+        // without blending a body crossing the seam changes current in a single step.
+        JoltWaterVolumeSettings still;
+        still.m_fluidDensity = 1000.0f;
+        still.m_linearDrag = 2.0f;
+        m_waterVolume.SetSettings(still);
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), AZ::Vector3(40.0f, 40.0f, 5.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        JoltWaterVolume river;
+        JoltWaterVolumeSettings flowing = still;
+        flowing.m_fluidVelocity = AZ::Vector3(6.0f, 0.0f, 0.0f);
+        river.SetSettings(flowing);
+        // Overlaps the still water, sitting slightly lower so the still volume owns bodies
+        // in the shared region.
+        river.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -3.0f)), AZ::Vector3(40.0f, 40.0f, 5.0f));
+        ASSERT_TRUE(river.AttachToPhysicsSystem(m_physicsSystem.get()));
+        m_extraVolumes.push_back(&river);
+
+        // Neutrally buoyant and placed well below both surfaces, so each volume genuinely
+        // holds it. A body floating at the river's own surface has almost no depth in the
+        // river and would correctly get almost none of its current.
+        auto cube = CreateCube(1000.0f, -3.0f);
+        Simulate(3.0f);
+
+        // Exactly one volume owns it, so it is not double-pushed - but the current it feels
+        // is a blend, so it does move downstream rather than sitting still.
+        const float driftX = GetBodyPosition(cube).GetX();
+        EXPECT_GT(driftX, 0.5f) << "the owner should blend in the overlapping river's current";
+        EXPECT_LT(driftX, 18.0f) << "but not feel the full current as though it were the river's alone";
+
+        river.Detach();
+        m_extraVolumes.clear();
     }
 
     TEST_F(JoltWaterVolumeTests, AttachingToNothingFails)

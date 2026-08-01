@@ -84,7 +84,17 @@ namespace JoltBuoyancy
             const float radius = m_dimensions.GetX() * 0.5f;
             return localPoint.GetLengthSq() <= radius * radius;
         }
-        return localPoint.GetAbs().IsLessEqualThan(m_dimensions * 0.5f);
+
+        const AZ::Vector3 halfExtents = m_dimensions * 0.5f;
+        if (m_shape == JoltWaterVolumeShape::Plane)
+        {
+            // No floor: anything below the surface inside the horizontal extent is in the
+            // water. A body sinking past the bottom of a box stops being wet, which is
+            // wrong for open sea.
+            return AZStd::abs(localPoint.GetX()) <= halfExtents.GetX() &&
+                AZStd::abs(localPoint.GetY()) <= halfExtents.GetY() && localPoint.GetZ() <= halfExtents.GetZ();
+        }
+        return localPoint.GetAbs().IsLessEqualThan(halfExtents);
     }
 
     float JoltWaterVolumeSnapshot::SubmersionDepth(const AZ::Vector3& worldPoint) const
@@ -299,7 +309,10 @@ namespace JoltBuoyancy
             snapshot.m_dimensions = m_dimensions;
             snapshot.m_worldBounds = m_worldBounds;
         }
-        snapshot.m_shape = GetSettings().m_shape;
+        const JoltWaterVolumeSettings settings = GetSettings();
+        snapshot.m_shape = settings.m_shape;
+        snapshot.m_fluidDensity = settings.m_fluidDensity;
+        snapshot.m_fluidVelocity = settings.m_fluidVelocity;
         snapshot.m_enabled = IsEnabled();
         snapshot.m_owner = this;
         return snapshot;
@@ -582,6 +595,8 @@ namespace JoltBuoyancy
         self.m_dimensions = dimensions;
         self.m_worldBounds = worldBounds;
         self.m_shape = settings.m_shape;
+        self.m_fluidDensity = settings.m_fluidDensity;
+        self.m_fluidVelocity = settings.m_fluidVelocity;
         self.m_enabled = true;
         self.m_owner = this;
 
@@ -658,6 +673,12 @@ namespace JoltBuoyancy
             // what makes per-body overrides and enter/exit notifications possible at all.
             const AZ::EntityId bodyEntityId(body->GetUserData());
 
+            // The fluid this body sees. Per body, not per volume: the blend below is
+            // specific to where this body sits, and writing it back into the shared
+            // settings would leak one body's blend into the next.
+            float bodyFluidDensity = settings.m_fluidDensity;
+            AZ::Vector3 bodyFluidVelocity = settings.m_fluidVelocity;
+
             // With overlapping volumes, the one holding the body deepest below its surface
             // owns it. Every volume computes this from the same data and reaches the same
             // answer, so it does not matter which order Jolt runs the listener jobs in.
@@ -716,6 +737,38 @@ namespace JoltBuoyancy
                     continue;
                 }
                 ownedThisStep.insert(bodyEntityId);
+
+                // Owning a body outright and ignoring the neighbour makes an estuary a
+                // step change: river current one frame, still ocean the next. The owner
+                // still applies the only impulse - no double buoyancy - but blends its
+                // fluid toward any peer that also holds the body, weighted by how deeply
+                // each one does. The crossing becomes a gradient instead of an edge.
+                float ownWeight = AZ::GetMax(ownDepth, 0.0f) + 1.0e-3f;
+                float totalWeight = ownWeight;
+                AZ::Vector3 blendedVelocity = self.m_fluidVelocity * ownWeight;
+                float blendedDensity = self.m_fluidDensity * ownWeight;
+
+                for (const JoltWaterVolumeSnapshot& peerSnapshot : peerSnapshots)
+                {
+                    if (!peerSnapshot.Contains(bodyPosition))
+                    {
+                        continue;
+                    }
+                    const float peerWeight = AZ::GetMax(peerSnapshot.SubmersionDepth(bodyPosition), 0.0f);
+                    if (peerWeight <= 0.0f)
+                    {
+                        continue;
+                    }
+                    blendedVelocity += peerSnapshot.m_fluidVelocity * peerWeight;
+                    blendedDensity += peerSnapshot.m_fluidDensity * peerWeight;
+                    totalWeight += peerWeight;
+                }
+
+                if (totalWeight > 0.0f)
+                {
+                    bodyFluidVelocity = blendedVelocity / totalWeight;
+                    bodyFluidDensity = blendedDensity / totalWeight;
+                }
             }
 
             // Bodies the volume's collision group excludes never reach the solver, so a
@@ -753,7 +806,7 @@ namespace JoltBuoyancy
                 if (shapeVolume > 0.0f && inverseMass > 0.0f)
                 {
                     const float bodyDensity = (1.0f / inverseMass) / shapeVolume;
-                    buoyancy = settings.m_fluidDensity / AZStd::max(bodyDensity, 0.001f);
+                    buoyancy = bodyFluidDensity / AZStd::max(bodyDensity, 0.001f);
                 }
             }
 
@@ -795,7 +848,7 @@ namespace JoltBuoyancy
             // The volume's own current plus the water's orbital motion at this body.
             // Passing only the current makes the sea a conveyor belt; the orbital part is
             // what makes a boat surge down the face of a swell and flotsam gather in lines.
-            const AZ::Vector3 waterVelocity = settings.m_fluidVelocity + surface.m_velocity;
+            const AZ::Vector3 waterVelocity = bodyFluidVelocity + surface.m_velocity;
 
             if (body->ApplyBuoyancyImpulse(
                     ToJoltR(surface.m_position), ToJolt(surface.m_normal), buoyancy, linearDrag, angularDrag,

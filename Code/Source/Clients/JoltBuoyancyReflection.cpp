@@ -47,6 +47,7 @@ namespace JoltBuoyancy
                 ->Field("AmplitudeScale", &JoltWaterSpectrum::m_amplitudeScale)
                 ->Field("Steepness", &JoltWaterSpectrum::m_steepness)
                 ->Field("SpeedScale", &JoltWaterSpectrum::m_speedScale)
+                ->Field("WaterDepth", &JoltWaterSpectrum::m_waterDepth)
                 ->Field("Seed", &JoltWaterSpectrum::m_seed)
                 ;
 
@@ -90,6 +91,12 @@ namespace JoltBuoyancy
                         "Speed scale", "Scales the whole sea's motion without changing its shape. Wave speeds "
                         "themselves come from the dispersion relation and are not authored.")
                         ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterSpectrum::m_waterDepth,
+                        "Water depth", "0 is deep water. A finite depth slows and shortens the longer waves, which "
+                        "is swell steepening as it runs into a beach. One depth for the whole volume: real shoaling "
+                        "needs a depth that varies with the sea floor.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
+                        ->Attribute(AZ::Edit::Attributes::Suffix, " m")
                     ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterSpectrum::m_seed,
                         "Seed", "Makes the sea repeatable run to run.")
                     ;
@@ -109,6 +116,7 @@ namespace JoltBuoyancy
                 ->Property("amplitudeScale", BehaviorValueProperty(&JoltWaterSpectrum::m_amplitudeScale))
                 ->Property("steepness", BehaviorValueProperty(&JoltWaterSpectrum::m_steepness))
                 ->Property("speedScale", BehaviorValueProperty(&JoltWaterSpectrum::m_speedScale))
+                ->Property("waterDepth", BehaviorValueProperty(&JoltWaterSpectrum::m_waterDepth))
                 ->Property("seed", BehaviorValueProperty(&JoltWaterSpectrum::m_seed))
                 ;
         }
@@ -145,6 +153,7 @@ namespace JoltBuoyancy
                         "sits at the top of the sphere.")
                         ->EnumAttribute(JoltWaterVolumeShape::Box, "Box")
                         ->EnumAttribute(JoltWaterVolumeShape::Sphere, "Sphere")
+                        ->EnumAttribute(JoltWaterVolumeShape::Plane, "Plane (open water)")
                     ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_fluidDensity,
                         "Fluid density", "Density of the fluid. A body floats when it is less dense than this and "
                         "sinks when it is denser. Fresh water is 1000.")
@@ -207,6 +216,7 @@ namespace JoltBuoyancy
             behaviorContext->Enum<static_cast<int>(JoltBuoyancyMode::Explicit)>("JoltBuoyancyMode_Explicit");
             behaviorContext->Enum<static_cast<int>(JoltWaterVolumeShape::Box)>("JoltWaterVolumeShape_Box");
             behaviorContext->Enum<static_cast<int>(JoltWaterVolumeShape::Sphere)>("JoltWaterVolumeShape_Sphere");
+            behaviorContext->Enum<static_cast<int>(JoltWaterVolumeShape::Plane)>("JoltWaterVolumeShape_Plane");
 
             behaviorContext->EBus<JoltWaterVolumeRequestBus>("JoltWaterVolumeRequestBus")
                 ->Attribute(AZ::Script::Attributes::Category, "Jolt Physics")

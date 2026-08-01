@@ -71,6 +71,12 @@ namespace JoltBuoyancy
 
         JoltWaterVolumeShape m_shape = JoltWaterVolumeShape::Box;
 
+        //! Enough of the peer's settings to blend with. Ownership is all-or-nothing, so
+        //! without this a body crossing from a river into a pool changes current and
+        //! density in a single step.
+        float m_fluidDensity = 1000.0f;
+        AZ::Vector3 m_fluidVelocity = AZ::Vector3::CreateZero();
+
         //! Whether a world-space point lies inside the volume's region.
         bool Contains(const AZ::Vector3& worldPoint) const;
 

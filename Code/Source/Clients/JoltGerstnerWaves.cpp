@@ -101,6 +101,25 @@ namespace JoltBuoyancy
             // speed c = w/k = sqrt(g/k) follows from that. Long waves outrun short ones
             // without anyone authoring a speed.
             component.m_waveNumber = centre * centre / Gravity;
+
+            // Shallow water: w^2 = g k tanh(k d). Solved for k by fixed-point iteration
+            // from the deep-water guess, which converges in a handful of steps because
+            // tanh is monotonic and bounded. Long waves feel the bottom first, slow and
+            // shorten - which is swell steepening as it runs into a beach.
+            if (spectrum.m_waterDepth > 0.0f)
+            {
+                float waveNumber = component.m_waveNumber;
+                for (int iteration = 0; iteration < 8; ++iteration)
+                {
+                    const float tanhTerm = std::tanh(waveNumber * spectrum.m_waterDepth);
+                    if (tanhTerm <= 1.0e-6f)
+                    {
+                        break;
+                    }
+                    waveNumber = centre * centre / (Gravity * tanhTerm);
+                }
+                component.m_waveNumber = waveNumber;
+            }
             component.m_angularFrequency = centre;
             component.m_steepness = AZ::GetClamp(spectrum.m_steepness, 0.0f, 1.0f);
             // Offset so the components do not all start crest-aligned at the origin, which

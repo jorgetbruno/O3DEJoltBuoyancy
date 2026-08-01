@@ -31,6 +31,11 @@ namespace JoltBuoyancy
         //! A sphere, sized by the X dimension. Its surface plane sits at the top of the
         //! sphere, so it reads as a tank filled to the brim.
         Sphere = 1,
+        //! Everything below the surface within a horizontal extent, with no floor. An
+        //! ocean is not a box: a body that sinks past the bottom of one stops being in the
+        //! water, which is wrong for open sea. Pair with a follow entity so the broadphase
+        //! query box travels with the player instead of spanning the world.
+        Plane = 2,
     };
 
     //! A sea described the way oceanography describes one, rather than as a list of waves.
@@ -78,6 +83,18 @@ namespace JoltBuoyancy
         float m_amplitudeScale = 1.0f;
         float m_steepness = 0.7f;
         float m_speedScale = 1.0f;
+
+        //! Depth of water under the surface, in metres. Zero means deep water, where the
+        //! dispersion relation is w^2 = g k.
+        //!
+        //! In shallow water the sea floor interferes: w^2 = g k tanh(k d). Long waves feel
+        //! the bottom first, slow down and shorten, which is why swell bunches up and
+        //! steepens as it reaches a beach. Setting a depth is what makes that happen.
+        //!
+        //! This is one depth for the whole volume. Real shoaling needs a depth that varies
+        //! with the sea floor, which would mean sampling terrain from the physics step -
+        //! a dependency this gem does not have and should not take on speculatively.
+        float m_waterDepth = 0.0f;
 
         //! Makes synthesis repeatable, so the same spectrum gives the same sea every run.
         AZ::u32 m_seed = 12345;

@@ -53,6 +53,10 @@ namespace JoltBuoyancy
         {
             return m_sceneName;
         }
+        AZ::EntityId& AccessFollowEntityId()
+        {
+            return m_followEntityId;
+        }
 
     protected:
         // AZ::Component
@@ -105,6 +109,10 @@ namespace JoltBuoyancy
         //! than something running on a physics job.
         void DispatchWaterEvents();
 
+        //! Recentres the volume on the follow entity, if one is set and it has moved far
+        //! enough to be worth doing.
+        void UpdateFollowPosition();
+
         AZ::Vector3 m_dimensions = AZ::Vector3(10.0f, 10.0f, 5.0f);
         JoltWaterVolumeSettings m_settings;
         bool m_visible = true;
@@ -112,6 +120,21 @@ namespace JoltBuoyancy
         //! Serialized, so a level can author water that starts switched off and is turned
         //! on by gameplay later.
         bool m_enabled = true;
+
+        //! An entity the volume recentres on horizontally each frame.
+        //!
+        //! An ocean cannot be one enormous box: the broadphase is queried with its bounds,
+        //! and a world-sized query every step would be ruinous. Following the player keeps
+        //! the queried region small while the water reads as unbounded. The surface height
+        //! never moves, only the horizontal placement, so the sea does not appear to rise
+        //! and fall as the camera travels.
+        AZ::EntityId m_followEntityId;
+
+        //! How far the follow entity has to move before the volume is recentred. Recentring
+        //! resizes nothing, but it does change the volume's transform, which resynthesises
+        //! nothing and costs little - still, doing it every frame for a millimetre of drift
+        //! is pointless.
+        float m_followThreshold = 5.0f;
 
         //! Which scene to attach to. Empty means the default scene, which is what almost
         //! everything wants; naming one lets a volume live in a secondary scene.

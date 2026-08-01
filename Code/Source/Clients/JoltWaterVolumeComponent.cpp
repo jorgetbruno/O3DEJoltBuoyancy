@@ -26,6 +26,8 @@ namespace JoltBuoyancy
                 ->Field("Visible", &JoltWaterVolumeComponent::m_visible)
                 ->Field("Enabled", &JoltWaterVolumeComponent::m_enabled)
                 ->Field("SceneName", &JoltWaterVolumeComponent::m_sceneName)
+                ->Field("FollowEntityId", &JoltWaterVolumeComponent::m_followEntityId)
+                ->Field("FollowThreshold", &JoltWaterVolumeComponent::m_followThreshold)
                 ;
 
             if (AZ::EditContext* editContext = serializeContext->GetEditContext())
@@ -42,6 +44,14 @@ namespace JoltBuoyancy
                         ->Attribute(AZ::Edit::Attributes::Suffix, " m")
                     ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeComponent::m_settings,
                         "Water", "Fluid properties")
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeComponent::m_followEntityId,
+                        "Follow entity", "Recentres the volume horizontally on this entity each frame, so an ocean "
+                        "can be a modest box that travels with the player rather than a world-sized one the "
+                        "broadphase has to query. The surface height never moves.")
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeComponent::m_followThreshold,
+                        "Follow threshold", "How far the followed entity must move before the volume is recentred.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
+                        ->Attribute(AZ::Edit::Attributes::Suffix, " m")
                     ->DataElement(AZ::Edit::UIHandlers::CheckBox, &JoltWaterVolumeComponent::m_visible,
                         "Visible", "Draw the water as a translucent box. There is no water mesh or material: this "
                         "drawing is the volume itself, so it always matches what the solver uses.")
@@ -140,6 +150,8 @@ namespace JoltBuoyancy
 
     void JoltWaterVolumeComponent::OnTick(float /*deltaTime*/, AZ::ScriptTimePoint /*time*/)
     {
+        UpdateFollowPosition();
+
         if (!m_visible)
         {
             return;
@@ -154,6 +166,29 @@ namespace JoltBuoyancy
         {
             DrawWaterVolume(*debugDisplay, m_worldTransform, m_dimensions, &m_settings, &m_waterVolume);
         }
+    }
+
+    void JoltWaterVolumeComponent::UpdateFollowPosition()
+    {
+        if (!m_followEntityId.IsValid())
+        {
+            return;
+        }
+
+        AZ::Vector3 followPosition = AZ::Vector3::CreateZero();
+        AZ::TransformBus::EventResult(followPosition, m_followEntityId, &AZ::TransformBus::Events::GetWorldTranslation);
+
+        // Horizontal only. Moving the surface with the followed entity would make the sea
+        // rise and fall with the camera, which is the one thing a player would notice.
+        const AZ::Vector3 current = m_worldTransform.GetTranslation();
+        const AZ::Vector3 wanted(followPosition.GetX(), followPosition.GetY(), current.GetZ());
+        if ((wanted - current).GetLengthSq() < m_followThreshold * m_followThreshold)
+        {
+            return;
+        }
+
+        m_worldTransform.SetTranslation(wanted);
+        m_waterVolume.SetVolume(m_worldTransform, m_dimensions);
     }
 
     void JoltWaterVolumeComponent::SetFluidDensity(float density)
