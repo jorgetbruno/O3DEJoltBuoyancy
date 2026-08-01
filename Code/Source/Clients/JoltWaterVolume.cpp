@@ -1,10 +1,16 @@
 #include <Clients/JoltWaterVolume.h>
 
 #include <AzCore/Interface/Interface.h>
+#include <AzCore/Math/MathUtils.h>
 #include <AzCore/std/parallel/lock.h>
 
+#include <AzFramework/Physics/CollisionBus.h>
+
+#include <Clients/JoltBuoyancyOverrideRegistry.h>
 #include <Clients/JoltWaterVolumeRegistry.h>
 #include <JoltPhysics/JoltPhysicsBus.h>
+
+#include <cmath>
 
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
@@ -31,6 +37,23 @@ namespace JoltBuoyancy
         {
             return AZ::Vector3(v.GetX(), v.GetY(), v.GetZ());
         }
+
+        //! Whether a body on this object layer is visible to a query using this mask.
+        //! Only the physics gem can answer, so answers are cached for the step.
+        bool ObjectLayerPassesFilter(AZ::u32 objectLayer, AZ::u64 collidesWithMask, AZStd::unordered_map<AZ::u32, bool>& cache)
+        {
+            const auto cached = cache.find(objectLayer);
+            if (cached != cache.end())
+            {
+                return cached->second;
+            }
+
+            bool matches = true;
+            JoltPhysics::JoltPhysicsSystemRequestBus::BroadcastResult(
+                matches, &JoltPhysics::JoltPhysicsSystemRequests::ObjectLayerMatchesQueryMask, objectLayer, collidesWithMask);
+            cache.emplace(objectLayer, matches);
+            return matches;
+        }
     }
 
     bool JoltWaterVolumeSnapshot::Contains(const AZ::Vector3& worldPoint) const
@@ -52,6 +75,92 @@ namespace JoltBuoyancy
         const AZ::Vector3 surfacePosition =
             m_worldTransform.TransformPoint(AZ::Vector3(0.0f, 0.0f, m_dimensions.GetZ() * 0.5f));
         return (surfacePosition - worldPoint).Dot(surfaceNormal);
+    }
+
+    JoltWaterSurfaceSample JoltWaterVolume::EvaluateBuiltInSurface(
+        const JoltWaterVolumeSnapshot& snapshot,
+        const JoltWaterVolumeSettings& settings,
+        float elapsedTime,
+        const AZ::Vector3& worldPoint)
+    {
+        const AZ::Transform& transform = snapshot.m_worldTransform;
+        const float halfHeight = snapshot.m_dimensions.GetZ() * 0.5f;
+
+        if (!settings.m_wavesEnabled || settings.m_waveAmplitude <= 0.0f || settings.m_waveLength <= 0.0f)
+        {
+            JoltWaterSurfaceSample flat;
+            flat.m_normal = transform.TransformVector(AZ::Vector3::CreateAxisZ()).GetNormalizedSafe();
+            flat.m_position = transform.TransformPoint(AZ::Vector3(0.0f, 0.0f, halfHeight));
+            return flat;
+        }
+
+        // Everything happens in the volume's own space, so the wave rides a tilted volume
+        // instead of ignoring the tilt and staying world-flat.
+        const AZ::Transform inverseTransform = transform.GetInverse();
+        const AZ::Vector3 localPoint = inverseTransform.TransformPoint(worldPoint);
+
+        const AZ::Vector2 direction = settings.m_waveDirection.GetLengthSq() > 0.0f
+            ? settings.m_waveDirection.GetNormalized()
+            : AZ::Vector2(1.0f, 0.0f);
+        const float waveNumber = AZ::Constants::TwoPi / settings.m_waveLength;
+        const float phase = waveNumber * settings.m_waveSpeed * elapsedTime;
+
+        const auto heightAt = [&](float x, float y)
+        {
+            return halfHeight + settings.m_waveAmplitude * std::sin(waveNumber * (direction.GetX() * x + direction.GetY() * y) - phase);
+        };
+
+        // Three taps around the point give the local slope; the analytic derivative would
+        // do as well, but finite differences keep working if this is ever swapped for a
+        // sum of waves or a texture.
+        const float epsilon = 0.05f * settings.m_waveLength;
+        const float here = heightAt(localPoint.GetX(), localPoint.GetY());
+        const float alongX = heightAt(localPoint.GetX() + epsilon, localPoint.GetY());
+        const float alongY = heightAt(localPoint.GetX(), localPoint.GetY() + epsilon);
+
+        const AZ::Vector3 tangentX(epsilon, 0.0f, alongX - here);
+        const AZ::Vector3 tangentY(0.0f, epsilon, alongY - here);
+        const AZ::Vector3 localNormal = tangentX.Cross(tangentY).GetNormalizedSafe();
+
+        JoltWaterSurfaceSample sample;
+        sample.m_position = transform.TransformPoint(AZ::Vector3(localPoint.GetX(), localPoint.GetY(), here));
+        sample.m_normal = transform.TransformVector(localNormal).GetNormalizedSafe();
+        return sample;
+    }
+
+    JoltWaterSurfaceSample JoltWaterVolume::EvaluateSurface(const AZ::Vector3& worldPoint) const
+    {
+        {
+            AZStd::lock_guard lock(m_surfaceFunctionMutex);
+            if (m_surfaceFunction)
+            {
+                return m_surfaceFunction(worldPoint);
+            }
+        }
+
+        const JoltWaterVolumeSnapshot snapshot = GetSnapshot();
+        return EvaluateBuiltInSurface(
+            snapshot, GetSettings(), m_elapsedTime.load(AZStd::memory_order_relaxed), worldPoint);
+    }
+
+    void JoltWaterVolume::SetSurfaceFunction(SurfaceFunction surfaceFunction)
+    {
+        AZStd::lock_guard lock(m_surfaceFunctionMutex);
+        m_surfaceFunction = AZStd::move(surfaceFunction);
+    }
+
+    float JoltWaterVolume::GetSubmergedFraction(AZ::EntityId bodyEntityId) const
+    {
+        AZStd::lock_guard lock(m_submergedMutex);
+        const auto found = m_submerged.find(bodyEntityId);
+        return found != m_submerged.end() ? found->second : 0.0f;
+    }
+
+    void JoltWaterVolume::TakePendingEvents(AZStd::vector<JoltWaterVolumeEvent>& outEvents)
+    {
+        outEvents.clear();
+        AZStd::lock_guard lock(m_pendingEventMutex);
+        outEvents.swap(m_pendingEvents);
     }
 
     JoltWaterVolume::~JoltWaterVolume()
@@ -185,6 +294,18 @@ namespace JoltBuoyancy
         // already settled, so this counts as a change too.
         BumpGeneration();
 
+        // Resolved here, on whichever thread called the setter, because it is a bus call
+        // and OnStep runs on Jolt's job threads where gameplay buses are off limits.
+        AZ::u64 mask = ~0ull;
+        if (!settings.m_collisionGroupId.m_id.IsNull())
+        {
+            AzPhysics::CollisionGroup group = AzPhysics::CollisionGroup::All;
+            Physics::CollisionRequestBus::BroadcastResult(
+                group, &Physics::CollisionRequests::GetCollisionGroupById, settings.m_collisionGroupId);
+            mask = group.GetMask();
+        }
+        m_collidesWithMask.store(mask, AZStd::memory_order_relaxed);
+
         AZStd::lock_guard lock(m_settingsMutex);
         m_settings = settings;
     }
@@ -222,11 +343,10 @@ namespace JoltBuoyancy
             return;
         }
 
-        // The surface is the volume's local +Z face, so a tilted volume gives a tilted
-        // water surface (a sloped river, say) rather than always a horizontal one.
-        const AZ::Vector3 surfaceNormal = worldTransform.TransformVector(AZ::Vector3::CreateAxisZ()).GetNormalizedSafe();
-        const AZ::Vector3 surfacePosition =
-            worldTransform.TransformPoint(AZ::Vector3(0.0f, 0.0f, dimensions.GetZ() * 0.5f));
+        // The wave phase advances with the simulation rather than with a wall clock, so a
+        // paused game has a still surface.
+        const float elapsedTime = m_elapsedTime.fetch_add(inContext.mDeltaTime, AZStd::memory_order_relaxed) +
+            inContext.mDeltaTime;
 
         const JPH::AABox queryBox(ToJolt(worldBounds.GetMin()), ToJolt(worldBounds.GetMax()));
         JPH::AllHitCollisionCollector<JPH::CollideShapeBodyCollector> collector;
@@ -267,6 +387,33 @@ namespace JoltBuoyancy
         m_wakeGeneration = generation;
         AZStd::vector<JPH::BodyID> toWake;
 
+        // Copied once for the whole step rather than consulted per body: the surface
+        // function is swappable from gameplay, and holding its mutex across the loop would
+        // block a setter for the whole step.
+        SurfaceFunction customSurface;
+        {
+            AZStd::lock_guard lock(m_surfaceFunctionMutex);
+            customSurface = m_surfaceFunction;
+        }
+
+        const AZ::u64 collidesWithMask = m_collidesWithMask.load(AZStd::memory_order_relaxed);
+        const bool hasOverrides = !JoltBuoyancyOverrideRegistry::Get().IsEmpty();
+
+        // Object layers repeat heavily across bodies, so each distinct one is resolved once
+        // per step instead of asking the physics gem per body.
+        AZStd::unordered_map<AZ::u32, bool> layerFilterCache;
+
+        AZStd::unordered_map<AZ::EntityId, float> nowSubmerged;
+        AZStd::unordered_map<AZ::EntityId, float> entrySpeeds;
+
+        // Who was in the water last step. A sleeping body is not processed, but it has not
+        // left the water either, so it is carried across rather than reported as an exit.
+        AZStd::unordered_map<AZ::EntityId, float> previouslySubmerged;
+        {
+            AZStd::lock_guard lock(m_submergedMutex);
+            previouslySubmerged = m_submerged;
+        }
+
         // Step listeners run with every body mutex already held, so bodies are read
         // through the no-lock interface; taking a lock here would deadlock.
         const JPH::BodyLockInterface& bodyLockInterface = m_physicsSystem->GetBodyLockInterfaceNoLock();
@@ -288,6 +435,15 @@ namespace JoltBuoyancy
                 if (wakeSleepers)
                 {
                     toWake.push_back(bodyId);
+                }
+
+                // Falling asleep is not leaving the water. Carrying it across keeps it out
+                // of the exit events and keeps its last submerged fraction readable.
+                const AZ::EntityId sleepingEntityId(body->GetUserData());
+                const auto wasSubmerged = previouslySubmerged.find(sleepingEntityId);
+                if (wasSubmerged != previouslySubmerged.end())
+                {
+                    nowSubmerged.emplace(sleepingEntityId, wasSubmerged->second);
                 }
                 continue;
             }
@@ -324,24 +480,91 @@ namespace JoltBuoyancy
                 }
             }
 
+            // The physics gem stamps every body it creates with its entity id, which is
+            // what makes per-body overrides and enter/exit notifications possible at all.
+            const AZ::EntityId bodyEntityId(body->GetUserData());
+
+            // Bodies the volume's collision group excludes never reach the solver, so a
+            // volume can be made to float debris while ignoring the player.
+            if (collidesWithMask != ~0ull &&
+                !ObjectLayerPassesFilter(static_cast<AZ::u32>(body->GetObjectLayer()), collidesWithMask, layerFilterCache))
+            {
+                continue;
+            }
+
+            JoltBuoyancyOverride bodyOverride;
+            if (hasOverrides)
+            {
+                bodyOverride = JoltBuoyancyOverrideRegistry::Get().Find(bodyEntityId);
+                if (bodyOverride.m_excluded)
+                {
+                    continue;
+                }
+            }
+
             // Jolt's buoyancy factor is relative: 1 is neutral, above 1 floats. Deriving
             // it from the body's own density is what makes a dense body sink and a light
-            // one bob, instead of every body behaving the same way.
+            // one bob, instead of every body behaving the same way. An explicit override is
+            // how a sealed hull floats regardless of what its collider volume implies.
             float buoyancy = 1.0f;
             const JPH::Shape* shape = body->GetShape();
-            const float shapeVolume = shape ? shape->GetVolume() : 0.0f;
-            const float inverseMass = body->GetMotionProperties()->GetInverseMass();
-            if (shapeVolume > 0.0f && inverseMass > 0.0f)
+            if (bodyOverride.m_mode == JoltBuoyancyMode::Explicit)
             {
-                const float bodyDensity = (1.0f / inverseMass) / shapeVolume;
-                buoyancy = settings.m_fluidDensity / AZStd::max(bodyDensity, 0.001f);
+                buoyancy = bodyOverride.m_factor;
+            }
+            else
+            {
+                const float shapeVolume = shape ? shape->GetVolume() : 0.0f;
+                const float inverseMass = body->GetMotionProperties()->GetInverseMass();
+                if (shapeVolume > 0.0f && inverseMass > 0.0f)
+                {
+                    const float bodyDensity = (1.0f / inverseMass) / shapeVolume;
+                    buoyancy = settings.m_fluidDensity / AZStd::max(bodyDensity, 0.001f);
+                }
+            }
+
+            // Sampled per body rather than once for the volume, which is what lets the
+            // surface be a wave instead of a plane: two boats on the same swell sit at
+            // different heights and tilt with their own bit of it.
+            const AZ::Vector3 bodyPosition = FromJolt(JPH::Vec3(body->GetCenterOfMassPosition()));
+            JoltWaterSurfaceSample surface;
+            if (customSurface)
+            {
+                surface = customSurface(bodyPosition);
+            }
+            else
+            {
+                surface = EvaluateBuiltInSurface(self, settings, elapsedTime, bodyPosition);
             }
 
             if (body->ApplyBuoyancyImpulse(
-                    ToJoltR(surfacePosition), ToJolt(surfaceNormal), buoyancy, settings.m_linearDrag,
+                    ToJoltR(surface.m_position), ToJolt(surface.m_normal), buoyancy, settings.m_linearDrag,
                     settings.m_angularDrag, ToJolt(settings.m_fluidVelocity), gravity, inContext.mDeltaTime))
             {
                 ++submergedCount;
+
+                float submergedFraction = 0.0f;
+                if (settings.m_reportSubmergedFraction && shape)
+                {
+                    // Jolt works this out inside ApplyBuoyancyImpulse but keeps it, so
+                    // getting at it means walking the shape again - hence the opt-in.
+                    const JPH::Plane surfacePlane =
+                        JPH::Plane::sFromPointAndNormal(ToJolt(surface.m_position), ToJolt(surface.m_normal));
+                    float totalVolume = 0.0f;
+                    float submergedVolume = 0.0f;
+                    JPH::Vec3 centerOfBuoyancy = JPH::Vec3::sZero();
+                    shape->GetSubmergedVolume(
+                        body->GetCenterOfMassTransform().ToMat44(), JPH::Vec3::sReplicate(1.0f), surfacePlane, totalVolume,
+                        submergedVolume, centerOfBuoyancy JPH_IF_DEBUG_RENDERER(, JPH::RVec3::sZero()));
+                    submergedFraction = totalVolume > 0.0f ? submergedVolume / totalVolume : 0.0f;
+                }
+
+                if (bodyEntityId.IsValid())
+                {
+                    const float entrySpeed = AZStd::abs(FromJolt(body->GetLinearVelocity()).Dot(surface.m_normal));
+                    nowSubmerged.emplace(bodyEntityId, submergedFraction);
+                    entrySpeeds.emplace(bodyEntityId, entrySpeed);
+                }
             }
         }
 
@@ -351,6 +574,54 @@ namespace JoltBuoyancy
         {
             AZStd::lock_guard lock(m_pendingWakeMutex);
             m_pendingWake.insert(m_pendingWake.end(), toWake.begin(), toWake.end());
+        }
+
+        PublishSubmergedSet(nowSubmerged, entrySpeeds);
+    }
+
+    void JoltWaterVolume::PublishSubmergedSet(
+        const AZStd::unordered_map<AZ::EntityId, float>& nowSubmerged,
+        const AZStd::unordered_map<AZ::EntityId, float>& entrySpeeds)
+    {
+        AZStd::vector<JoltWaterVolumeEvent> events;
+        {
+            AZStd::lock_guard lock(m_submergedMutex);
+            for (const auto& [entityId, fraction] : nowSubmerged)
+            {
+                if (m_submerged.find(entityId) == m_submerged.end())
+                {
+                    JoltWaterVolumeEvent entered;
+                    entered.m_bodyEntityId = entityId;
+                    entered.m_entered = true;
+                    const auto speed = entrySpeeds.find(entityId);
+                    entered.m_speed = speed != entrySpeeds.end() ? speed->second : 0.0f;
+                    events.push_back(entered);
+                }
+            }
+            for (const auto& [entityId, fraction] : m_submerged)
+            {
+                if (nowSubmerged.find(entityId) == nowSubmerged.end())
+                {
+                    JoltWaterVolumeEvent exited;
+                    exited.m_bodyEntityId = entityId;
+                    exited.m_entered = false;
+                    events.push_back(exited);
+                }
+            }
+            m_submerged = nowSubmerged;
+
+            // Released as soon as it empties: this map lives on a volume that may outlive
+            // the allocator, and an empty map that still owns buckets reads as a leak.
+            if (m_submerged.empty())
+            {
+                AZStd::unordered_map<AZ::EntityId, float>().swap(m_submerged);
+            }
+        }
+
+        if (!events.empty())
+        {
+            AZStd::lock_guard lock(m_pendingEventMutex);
+            m_pendingEvents.insert(m_pendingEvents.end(), events.begin(), events.end());
         }
     }
 

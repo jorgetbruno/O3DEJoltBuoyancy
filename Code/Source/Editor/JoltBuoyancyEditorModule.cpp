@@ -2,6 +2,7 @@
 #include <AzCore/Module/Module.h>
 
 #include <Clients/JoltBuoyancyAllocator.h>
+#include <Clients/JoltBuoyancyOverrideComponent.h>
 #include <Clients/JoltWaterVolumeComponent.h>
 #include <Editor/EditorJoltWaterVolumeComponent.h>
 
@@ -27,6 +28,7 @@ namespace JoltBuoyancy
                     // The runtime component stays registered so BuildGameEntity can spawn
                     // it and prefabs referencing it keep loading.
                     JoltWaterVolumeComponent::CreateDescriptor(),
+                    JoltBuoyancyOverrideComponent::CreateDescriptor(),
                     EditorJoltWaterVolumeComponent::CreateDescriptor(),
                 });
         }

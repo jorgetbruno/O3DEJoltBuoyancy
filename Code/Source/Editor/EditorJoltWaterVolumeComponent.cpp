@@ -74,9 +74,9 @@ namespace JoltBuoyancy
     {
         if (auto* component = gameEntity->CreateComponent<JoltWaterVolumeComponent>())
         {
-            component->GetDimensions() = m_dimensions;
-            component->GetSettings() = m_settings;
-            component->GetVisible() = m_visible;
+            component->AccessDimensions() = m_dimensions;
+            component->AccessSettings() = m_settings;
+            component->AccessVisible() = m_visible;
         }
     }
 

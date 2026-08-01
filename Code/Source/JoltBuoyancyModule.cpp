@@ -2,6 +2,7 @@
 #include <AzCore/Module/Module.h>
 
 #include <Clients/JoltBuoyancyAllocator.h>
+#include <Clients/JoltBuoyancyOverrideComponent.h>
 #include <Clients/JoltWaterVolumeComponent.h>
 
 namespace JoltBuoyancy
@@ -22,6 +23,7 @@ namespace JoltBuoyancy
                 m_descriptors.end(),
                 {
                     JoltWaterVolumeComponent::CreateDescriptor(),
+                    JoltBuoyancyOverrideComponent::CreateDescriptor(),
                 });
         }
 

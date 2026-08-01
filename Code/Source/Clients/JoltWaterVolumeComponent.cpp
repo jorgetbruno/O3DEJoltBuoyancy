@@ -15,16 +15,10 @@ namespace JoltBuoyancy
 {
     void JoltWaterVolumeComponent::Reflect(AZ::ReflectContext* context)
     {
+        JoltWaterVolumeSettings::Reflect(context);
+
         if (auto* serializeContext = azrtti_cast<AZ::SerializeContext*>(context))
         {
-            serializeContext->Class<JoltWaterVolumeSettings>()
-                ->Version(1)
-                ->Field("FluidDensity", &JoltWaterVolumeSettings::m_fluidDensity)
-                ->Field("LinearDrag", &JoltWaterVolumeSettings::m_linearDrag)
-                ->Field("AngularDrag", &JoltWaterVolumeSettings::m_angularDrag)
-                ->Field("FluidVelocity", &JoltWaterVolumeSettings::m_fluidVelocity)
-                ;
-
             serializeContext->Class<JoltWaterVolumeComponent, AZ::Component>()
                 ->Version(2)
                 ->Field("Dimensions", &JoltWaterVolumeComponent::m_dimensions)
@@ -34,24 +28,6 @@ namespace JoltBuoyancy
 
             if (AZ::EditContext* editContext = serializeContext->GetEditContext())
             {
-                editContext->Class<JoltWaterVolumeSettings>("Water Settings", "")
-                    ->ClassElement(AZ::Edit::ClassElements::EditorData, "")
-                        ->Attribute(AZ::Edit::Attributes::AutoExpand, true)
-                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_fluidDensity,
-                        "Fluid density", "Density of the fluid. A body floats when it is less dense than this and "
-                        "sinks when it is denser. Fresh water is 1000.")
-                        ->Attribute(AZ::Edit::Attributes::Min, 0.001f)
-                        ->Attribute(AZ::Edit::Attributes::Suffix, " kg/m^3")
-                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_linearDrag,
-                        "Linear drag", "How strongly the water slows a body down. Higher feels thicker.")
-                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
-                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_angularDrag,
-                        "Angular drag", "How strongly the water damps a body's spin.")
-                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
-                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_fluidVelocity,
-                        "Fluid velocity", "Velocity of the water itself: a current that carries bodies along.")
-                    ;
-
                 editContext->Class<JoltWaterVolumeComponent>(
                     "Jolt Water Volume", "A box of water that makes Jolt rigid bodies float")
                     ->ClassElement(AZ::Edit::ClassElements::EditorData, "")
@@ -102,6 +78,7 @@ namespace JoltBuoyancy
             [this]([[maybe_unused]] AzPhysics::SceneHandle sceneHandle, [[maybe_unused]] float fixedDeltaTime)
             {
                 m_waterVolume.WakePendingBodies();
+                DispatchWaterEvents();
             });
         if (auto* sceneInterface = AZ::Interface<AzPhysics::SceneInterface>::Get();
             sceneInterface && m_attachedSceneHandle != AzPhysics::InvalidSceneHandle)
@@ -202,6 +179,73 @@ namespace JoltBuoyancy
     AZ::Vector3 JoltWaterVolumeComponent::GetFluidVelocity() const
     {
         return m_settings.m_fluidVelocity;
+    }
+
+    void JoltWaterVolumeComponent::SetDimensions(const AZ::Vector3& dimensions)
+    {
+        m_dimensions = dimensions.GetMax(AZ::Vector3(0.001f));
+        RefreshVolume();
+    }
+
+    AZ::Vector3 JoltWaterVolumeComponent::GetDimensions() const
+    {
+        return m_dimensions;
+    }
+
+    void JoltWaterVolumeComponent::SetWaterSettings(const JoltWaterVolumeSettings& settings)
+    {
+        m_settings = settings;
+        m_waterVolume.SetSettings(m_settings);
+    }
+
+    JoltWaterVolumeSettings JoltWaterVolumeComponent::GetWaterSettings() const
+    {
+        return m_settings;
+    }
+
+    void JoltWaterVolumeComponent::SetWavesEnabled(bool enabled)
+    {
+        m_settings.m_wavesEnabled = enabled;
+        m_waterVolume.SetSettings(m_settings);
+    }
+
+    bool JoltWaterVolumeComponent::GetWavesEnabled() const
+    {
+        return m_settings.m_wavesEnabled;
+    }
+
+    void JoltWaterVolumeComponent::SetWaveAmplitude(float amplitude)
+    {
+        m_settings.m_waveAmplitude = amplitude;
+        m_waterVolume.SetSettings(m_settings);
+    }
+
+    float JoltWaterVolumeComponent::GetWaveAmplitude() const
+    {
+        return m_settings.m_waveAmplitude;
+    }
+
+    float JoltWaterVolumeComponent::GetSubmergedFraction(AZ::EntityId bodyEntityId) const
+    {
+        return m_waterVolume.GetSubmergedFraction(bodyEntityId);
+    }
+
+    void JoltWaterVolumeComponent::DispatchWaterEvents()
+    {
+        m_waterVolume.TakePendingEvents(m_eventScratch);
+        for (const JoltWaterVolumeEvent& event : m_eventScratch)
+        {
+            if (event.m_entered)
+            {
+                JoltWaterVolumeNotificationBus::Event(
+                    GetEntityId(), &JoltWaterVolumeNotifications::OnBodyEnteredWater, event.m_bodyEntityId, event.m_speed);
+            }
+            else
+            {
+                JoltWaterVolumeNotificationBus::Event(
+                    GetEntityId(), &JoltWaterVolumeNotifications::OnBodyExitedWater, event.m_bodyEntityId);
+            }
+        }
     }
 
     void JoltWaterVolumeComponent::SetEnabled(bool enabled)

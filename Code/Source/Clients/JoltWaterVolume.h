@@ -10,11 +10,17 @@
 #include <AzCore/std/parallel/atomic.h>
 #include <AzCore/std/parallel/mutex.h>
 
+#include <AzCore/Component/EntityId.h>
+#include <AzCore/std/containers/unordered_map.h>
+#include <AzCore/std/functional.h>
+
 #include <AzFramework/Physics/Common/PhysicsTypes.h>
 
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/Body/BodyID.h>
 #include <Jolt/Physics/PhysicsStepListener.h>
+
+#include <JoltBuoyancy/JoltBuoyancyBus.h>
 
 namespace JPH
 {
@@ -23,17 +29,21 @@ namespace JPH
 
 namespace JoltBuoyancy
 {
-    //! Settings describing a body of water.
-    struct JoltWaterVolumeSettings
+    //! Where the water's surface is at one point, and which way it faces.
+    struct JoltWaterSurfaceSample
     {
-        AZ_CLASS_ALLOCATOR(JoltWaterVolumeSettings, AZ::SystemAllocator);
-        AZ_TYPE_INFO(JoltWaterVolumeSettings, "{E5F6A7B8-C9D0-4B4C-DE5F-6A7B8C9D0E1F}");
+        AZ::Vector3 m_position = AZ::Vector3::CreateZero();
+        AZ::Vector3 m_normal = AZ::Vector3::CreateAxisZ();
+    };
 
-        //! kg/m^3. A body floats when its own density is below this and sinks above it.
-        float m_fluidDensity = 1000.0f;
-        float m_linearDrag = 0.5f;
-        float m_angularDrag = 0.05f;
-        AZ::Vector3 m_fluidVelocity = AZ::Vector3::CreateZero();
+    //! A body crossing into or out of the water, queued during the step and delivered
+    //! afterwards.
+    struct JoltWaterVolumeEvent
+    {
+        AZ::EntityId m_bodyEntityId;
+        //! Speed along the surface normal on the way in. Zero for an exit.
+        float m_speed = 0.0f;
+        bool m_entered = false;
     };
 
     //! An immutable copy of a volume's placement, taken under its mutex so that one volume
@@ -123,13 +133,52 @@ namespace JoltBuoyancy
         //! Placement copied under the mutex, for peer volumes and for tests.
         JoltWaterVolumeSnapshot GetSnapshot() const;
 
+        //! Replaces the built-in flat-or-wavy surface with an arbitrary one, for water that
+        //! has to line up with something the gem knows nothing about - a rendered ocean, a
+        //! scripted tide. Given a world point, return the surface above it and its normal.
+        //!
+        //! Called from Jolt's step listener jobs, once per body, so it must be quick and
+        //! safe to call from several threads at once. Pass an empty function to go back to
+        //! the built-in surface.
+        using SurfaceFunction = AZStd::function<JoltWaterSurfaceSample(const AZ::Vector3& worldPoint)>;
+        void SetSurfaceFunction(SurfaceFunction surfaceFunction);
+
+        //! Where the surface sits above a world point, using whatever surface the volume is
+        //! currently configured with. Public so tests and gameplay can ask the same question
+        //! the solver does.
+        JoltWaterSurfaceSample EvaluateSurface(const AZ::Vector3& worldPoint) const;
+
+        //! Fraction of the body under the surface last step, 0 to 1. Always 0 unless the
+        //! ReportSubmergedFraction setting is on.
+        float GetSubmergedFraction(AZ::EntityId bodyEntityId) const;
+
+        //! Hands over the enter and exit events the last step produced, leaving the queue
+        //! empty. Called after the step, for the same reason as WakePendingBodies: a
+        //! handler is gameplay code and must not run on a physics job with the body
+        //! mutexes held.
+        void TakePendingEvents(AZStd::vector<JoltWaterVolumeEvent>& outEvents);
+
         // JPH::PhysicsStepListener
         void OnStep(const JPH::PhysicsStepListenerContext& inContext) override;
 
     private:
+        //! The built-in surface: the local +Z face, rippled by the wave settings when they
+        //! are on. Takes a pre-copied snapshot so it can run without touching the mutex.
+        static JoltWaterSurfaceSample EvaluateBuiltInSurface(
+            const JoltWaterVolumeSnapshot& snapshot,
+            const JoltWaterVolumeSettings& settings,
+            float elapsedTime,
+            const AZ::Vector3& worldPoint);
+
         //! Bumped whenever the water itself changes, so OnStep can tell "the body settled
         //! in water that has not moved since" from "the water just changed under it".
         void BumpGeneration();
+
+        //! Swaps in this step's submerged set, queueing an enter or exit for every body
+        //! that joined or left it.
+        void PublishSubmergedSet(
+            const AZStd::unordered_map<AZ::EntityId, float>& nowSubmerged,
+            const AZStd::unordered_map<AZ::EntityId, float>& entrySpeeds);
 
         JPH::PhysicsSystem* m_physicsSystem = nullptr;
 
@@ -152,5 +201,26 @@ namespace JoltBuoyancy
         //! on a job thread while the wake happens on the main thread.
         AZStd::mutex m_pendingWakeMutex;
         AZStd::vector<JPH::BodyID> m_pendingWake;
+
+        //! Wave phase. Advanced by OnStep rather than read from a clock, so the water only
+        //! moves when the simulation does and a paused game has a still surface.
+        AZStd::atomic<float> m_elapsedTime{ 0.0f };
+
+        //! Set by SetSurfaceFunction. Guarded because gameplay can swap it while a step is
+        //! reading it.
+        mutable AZStd::mutex m_surfaceFunctionMutex;
+        SurfaceFunction m_surfaceFunction;
+
+        //! The collision group mask resolved from the settings' group id, cached because
+        //! resolving it means a bus call that must not happen on a physics job.
+        AZStd::atomic<AZ::u64> m_collidesWithMask{ ~0ull };
+
+        //! Who was submerged, and by how much, as of the last step. Compared against the
+        //! next step's set to raise enter and exit events.
+        mutable AZStd::mutex m_submergedMutex;
+        AZStd::unordered_map<AZ::EntityId, float> m_submerged;
+
+        AZStd::mutex m_pendingEventMutex;
+        AZStd::vector<JoltWaterVolumeEvent> m_pendingEvents;
     };
 } // namespace JoltBuoyancy

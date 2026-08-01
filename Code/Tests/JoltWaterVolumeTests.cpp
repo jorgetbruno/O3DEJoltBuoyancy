@@ -2,6 +2,7 @@
 #include <AzCore/UnitTest/TestTypes.h>
 
 #include <Clients/JoltBuoyancyAllocator.h>
+#include <Clients/JoltBuoyancyOverrideRegistry.h>
 #include <Clients/JoltWaterVolume.h>
 
 #include <Jolt/Jolt.h>
@@ -10,6 +11,7 @@
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
 
@@ -155,6 +157,14 @@ namespace JoltBuoyancy
                 new JPH::BoxShape(JPH::Vec3(50.0f, 50.0f, 0.5f)), JPH::RVec3(0.0f, 0.0f, topZ - 0.5f),
                 JPH::Quat::sIdentity(), JPH::EMotionType::Static, TestObjectLayers::NonMoving);
             m_physicsSystem->GetBodyInterface().CreateAndAddBody(settings, JPH::EActivation::DontActivate);
+        }
+
+        //! Stamps a body with an entity id the way the JoltPhysics gem does when it creates
+        //! one. That stamp is what lets a volume find per-body overrides and name the body
+        //! in an enter or exit event.
+        void SetBodyEntityId(const JPH::BodyID& bodyId, AZ::EntityId entityId)
+        {
+            m_physicsSystem->GetBodyInterface().SetUserData(bodyId, static_cast<AZ::u64>(entityId));
         }
 
         AZ::Vector3 GetBodyPosition(const JPH::BodyID& bodyId) const
@@ -464,6 +474,233 @@ namespace JoltBuoyancy
         // And the two really did settle at different world heights, which is the whole
         // difference between a tilted surface and a flat one.
         EXPECT_GT(AZStd::abs(nearOriginEnd.GetZ() - downSlopeEnd.GetZ()), 0.5f);
+    }
+
+    TEST_F(JoltWaterVolumeTests, ExplicitBuoyancyFloatsABodyDenserThanTheFluid)
+    {
+        // The sealed hull case: a boat's collider volume is mostly air, so the density the
+        // gem would derive says it must sink. An explicit factor is how that is authored.
+        CreateWater();
+        auto cube = CreateCube(3000.0f, -3.0f);
+        const AZ::EntityId hull(0x5EA1EDu);
+
+        JoltBuoyancyOverride hullOverride;
+        hullOverride.m_mode = JoltBuoyancyMode::Explicit;
+        hullOverride.m_factor = 2.0f;
+        JoltBuoyancyOverrideRegistry::Get().Set(hull, hullOverride);
+        SetBodyEntityId(cube, hull);
+
+        Simulate(5.0f);
+
+        // Without the override this is DenseBodySinks, which ends up below -1.5.
+        EXPECT_GT(GetBodyZ(cube), -1.0f);
+
+        JoltBuoyancyOverrideRegistry::Get().Remove(hull);
+    }
+
+    TEST_F(JoltWaterVolumeTests, ExcludedBodyIsIgnoredByWater)
+    {
+        CreateWater();
+        auto cube = CreateCube(200.0f, -1.0f); // light: would float without the override
+        const AZ::EntityId excluded(0xEC1DEDu);
+
+        JoltBuoyancyOverride bodyOverride;
+        bodyOverride.m_excluded = true;
+        JoltBuoyancyOverrideRegistry::Get().Set(excluded, bodyOverride);
+        SetBodyEntityId(cube, excluded);
+
+        Simulate(1.0f);
+
+        // Free fall for a second is about -4.9 m; buoyancy would have stopped it.
+        EXPECT_LT(GetBodyZ(cube), -3.0f);
+        EXPECT_EQ(m_waterVolume.GetSubmergedBodyCount(), 0);
+
+        JoltBuoyancyOverrideRegistry::Get().Remove(excluded);
+    }
+
+    TEST_F(JoltWaterVolumeTests, WavesMoveTheSurfaceUpAndDown)
+    {
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        settings.m_wavesEnabled = true;
+        settings.m_waveAmplitude = 1.0f;
+        settings.m_waveLength = 8.0f;
+        settings.m_waveSpeed = 4.0f;
+        m_waterVolume.SetSettings(settings);
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), AZ::Vector3(50.0f, 50.0f, 5.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        // A crest and a trough: a quarter and three quarters along the wave. Sampling half
+        // a wavelength apart would compare two zero crossings and see no difference at all.
+        const float atCrest = m_waterVolume.EvaluateSurface(AZ::Vector3(2.0f, 0.0f, 0.0f)).m_position.GetZ();
+        const float atTrough = m_waterVolume.EvaluateSurface(AZ::Vector3(6.0f, 0.0f, 0.0f)).m_position.GetZ();
+        EXPECT_GT(atCrest - atTrough, 1.5f) << "amplitude 1 means about 2 m between crest and trough";
+
+        // The normal tilts off vertical where the surface slopes, which is what makes a
+        // floating body rock rather than just bob. Sampled at a zero crossing, where the
+        // slope is steepest - at the crest the surface is flat and the normal is straight up.
+        const AZ::Vector3 slopedNormal = m_waterVolume.EvaluateSurface(AZ::Vector3::CreateZero()).m_normal;
+        EXPECT_LT(slopedNormal.GetZ(), 0.999f);
+        EXPECT_NEAR(slopedNormal.GetLength(), 1.0f, 0.01f);
+
+        // And the wave travels: the same point is at a different height a moment later.
+        const float atOrigin = m_waterVolume.EvaluateSurface(AZ::Vector3::CreateZero()).m_position.GetZ();
+        Simulate(0.5f);
+        const float atOriginLater = m_waterVolume.EvaluateSurface(AZ::Vector3::CreateZero()).m_position.GetZ();
+        EXPECT_GT(AZStd::abs(atOriginLater - atOrigin), 0.1f);
+    }
+
+    TEST_F(JoltWaterVolumeTests, ACustomSurfaceFunctionReplacesTheBuiltInOne)
+    {
+        CreateWater();
+
+        // Water that is not a plane at all, for lining up with something the gem knows
+        // nothing about.
+        // Deliberately inside the box: the volume still decides which bodies are considered
+        // - that comes from its bounds - so a surface placed above the box would let bodies
+        // rise out of the query and stop being affected.
+        m_waterVolume.SetSurfaceFunction(
+            []([[maybe_unused]] const AZ::Vector3& worldPoint)
+            {
+                JoltWaterSurfaceSample sample;
+                sample.m_position = AZ::Vector3(0.0f, 0.0f, -2.0f);
+                sample.m_normal = AZ::Vector3::CreateAxisZ();
+                return sample;
+            });
+
+        EXPECT_NEAR(m_waterVolume.EvaluateSurface(AZ::Vector3::CreateZero()).m_position.GetZ(), -2.0f, 0.001f);
+
+        // A body floats to the surface the function describes, not the volume's own face,
+        // which for this volume would be z = 0.
+        auto cube = CreateCube(200.0f, -4.5f);
+        Simulate(6.0f);
+        EXPECT_GT(GetBodyZ(cube), -2.7f);
+        EXPECT_LT(GetBodyZ(cube), -1.3f);
+
+        m_waterVolume.SetSurfaceFunction({});
+    }
+
+    TEST_F(JoltWaterVolumeTests, EnteringAndLeavingTheWaterRaisesEvents)
+    {
+        CreateWater();
+        const AZ::EntityId floater(0xF10A7Eu);
+        auto cube = CreateCube(200.0f, 4.0f); // starts above the surface at z = 0
+        SetBodyEntityId(cube, floater);
+
+        AZStd::vector<JoltWaterVolumeEvent> events;
+
+        // Nothing yet: it is still in the air.
+        m_waterVolume.TakePendingEvents(events);
+        EXPECT_TRUE(events.empty());
+
+        Simulate(2.0f);
+        m_waterVolume.TakePendingEvents(events);
+
+        // The first thing that happens is the entry. A body dropped from a height splashes
+        // and can break the surface again on the way back up, so the count is not asserted -
+        // only that it went in first, and how fast.
+        ASSERT_FALSE(events.empty());
+        EXPECT_TRUE(events[0].m_entered);
+        EXPECT_EQ(events[0].m_bodyEntityId, floater);
+        // It fell about 4 m before touching down, so it went in at a decent clip - which is
+        // what tells a splash from a gentle drift.
+        EXPECT_GT(events[0].m_speed, 1.0f);
+
+        // Let it settle, discarding the churn from the splash.
+        Simulate(4.0f);
+        m_waterVolume.TakePendingEvents(events);
+
+        // Floating quietly now, or asleep: either way it is still in the water, so nothing
+        // more is raised.
+        Simulate(1.0f);
+        m_waterVolume.TakePendingEvents(events);
+        EXPECT_TRUE(events.empty());
+
+        // Taken out of the water: the volume notices it has gone.
+        m_physicsSystem->GetBodyInterface().SetPosition(cube, JPH::RVec3(500.0f, 0.0f, 0.0f), JPH::EActivation::Activate);
+        Simulate(0.2f);
+        m_waterVolume.TakePendingEvents(events);
+
+        ASSERT_EQ(events.size(), 1u);
+        EXPECT_FALSE(events[0].m_entered);
+        EXPECT_EQ(events[0].m_bodyEntityId, floater);
+    }
+
+    TEST_F(JoltWaterVolumeTests, SubmergedFractionIsReportedWhenAskedFor)
+    {
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        settings.m_reportSubmergedFraction = true;
+        m_waterVolume.SetSettings(settings);
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), AZ::Vector3(50.0f, 50.0f, 5.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        // A floor inside the water, so the dense body settles while still submerged instead
+        // of sinking out through the bottom of the volume.
+        CreateFloor(-4.0f);
+
+        const AZ::EntityId heavy(0xDEE9u);
+        const AZ::EntityId light(0xB0BBu);
+
+        auto sunk = CreateCube(3000.0f, -1.0f); // dense: sinks to the floor, fully under
+        SetBodyEntityId(sunk, heavy);
+        auto bobbing = CreateCubeAt(200.0f, AZ::Vector3(6.0f, 0.0f, -3.0f)); // light: rides the surface
+        SetBodyEntityId(bobbing, light);
+
+        Simulate(4.0f);
+
+        EXPECT_NEAR(m_waterVolume.GetSubmergedFraction(heavy), 1.0f, 0.05f);
+
+        const float lightFraction = m_waterVolume.GetSubmergedFraction(light);
+        EXPECT_GT(lightFraction, 0.05f);
+        EXPECT_LT(lightFraction, 0.95f) << "a floating body should be partly out of the water";
+    }
+
+    TEST_F(JoltWaterVolumeTests, SubmergedFractionIsZeroUnlessRequested)
+    {
+        // Off by default, because it costs a second pass over each body's shape.
+        CreateFloor(-4.0f);
+        CreateWater();
+        const AZ::EntityId body(0x0FFu);
+        // Dense and still sinking when sampled: fully under the surface, and awake, so it
+        // is definitely one of the bodies the volume applied to this step.
+        auto cube = CreateCube(3000.0f, -1.0f);
+        SetBodyEntityId(cube, body);
+
+        Simulate(0.5f);
+
+        EXPECT_GT(m_waterVolume.GetSubmergedBodyCount(), 0);
+        EXPECT_EQ(m_waterVolume.GetSubmergedFraction(body), 0.0f);
+    }
+
+    TEST_F(JoltWaterVolumeTests, CompoundShapeFloatsOnItsWholeVolume)
+    {
+        // A compound is what a real authored object is: several colliders on one body.
+        // Jolt sums the submerged volume across the parts, so the whole thing should float
+        // on its combined displacement rather than on one part of it.
+        CreateWater();
+
+        JPH::StaticCompoundShapeSettings compoundSettings;
+        compoundSettings.AddShape(JPH::Vec3(-0.75f, 0.0f, 0.0f), JPH::Quat::sIdentity(), new JPH::BoxShape(JPH::Vec3(0.5f, 0.5f, 0.5f)));
+        compoundSettings.AddShape(JPH::Vec3(0.75f, 0.0f, 0.0f), JPH::Quat::sIdentity(), new JPH::BoxShape(JPH::Vec3(0.5f, 0.5f, 0.5f)));
+        JPH::ShapeSettings::ShapeResult compoundResult = compoundSettings.Create();
+        ASSERT_FALSE(compoundResult.HasError()) << compoundResult.GetError().c_str();
+
+        // Two 1 m^3 boxes at 400 kg total is 200 kg/m^3, well under water.
+        JPH::BodyCreationSettings bodySettings(
+            compoundResult.Get(), JPH::RVec3(0.0f, 0.0f, -3.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic,
+            TestObjectLayers::Moving);
+        bodySettings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+        bodySettings.mMassPropertiesOverride.mMass = 400.0f;
+        JPH::BodyID compound = m_physicsSystem->GetBodyInterface().CreateAndAddBody(bodySettings, JPH::EActivation::Activate);
+
+        Simulate(6.0f);
+
+        const float restingZ = GetBodyPosition(compound).GetZ();
+        EXPECT_GT(restingZ, -0.8f);
+        EXPECT_LT(restingZ, 0.8f);
     }
 
     TEST_F(JoltWaterVolumeTests, AttachingToNothingFails)

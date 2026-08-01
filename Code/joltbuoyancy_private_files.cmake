@@ -1,6 +1,11 @@
 set(FILES
     Source/Clients/JoltBuoyancyAllocator.cpp
     Source/Clients/JoltBuoyancyAllocator.h
+    Source/Clients/JoltBuoyancyOverrideComponent.cpp
+    Source/Clients/JoltBuoyancyOverrideComponent.h
+    Source/Clients/JoltBuoyancyOverrideRegistry.cpp
+    Source/Clients/JoltBuoyancyOverrideRegistry.h
+    Source/Clients/JoltBuoyancyReflection.cpp
     Source/Clients/JoltWaterVolume.cpp
     Source/Clients/JoltWaterVolume.h
     Source/Clients/JoltWaterVolumeComponent.cpp
