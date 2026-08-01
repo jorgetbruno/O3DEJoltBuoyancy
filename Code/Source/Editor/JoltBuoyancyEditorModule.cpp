@@ -4,6 +4,7 @@
 #include <Clients/JoltBuoyancyAllocator.h>
 #include <Clients/JoltBuoyancyOverrideComponent.h>
 #include <Clients/JoltWaterVolumeComponent.h>
+#include <Editor/EditorJoltBuoyancyOverrideComponent.h>
 #include <Editor/EditorJoltWaterVolumeComponent.h>
 
 namespace JoltBuoyancy
@@ -30,6 +31,7 @@ namespace JoltBuoyancy
                     JoltWaterVolumeComponent::CreateDescriptor(),
                     JoltBuoyancyOverrideComponent::CreateDescriptor(),
                     EditorJoltWaterVolumeComponent::CreateDescriptor(),
+                    EditorJoltBuoyancyOverrideComponent::CreateDescriptor(),
                 });
         }
 
