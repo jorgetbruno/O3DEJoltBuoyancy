@@ -252,6 +252,7 @@ namespace JoltBuoyancy
                 ->Event("GetSurfacePositionAt", &JoltWaterVolumeRequestBus::Events::GetSurfacePositionAt)
                 ->Event("GetSurfaceNormalAt", &JoltWaterVolumeRequestBus::Events::GetSurfaceNormalAt)
                 ->Event("GetDepthAt", &JoltWaterVolumeRequestBus::Events::GetDepthAt)
+                ->Event("GetFoamAt", &JoltWaterVolumeRequestBus::Events::GetFoamAt)
                 ;
 
             behaviorContext->EBus<JoltWaterVolumeNotificationBus>("JoltWaterVolumeNotificationBus")

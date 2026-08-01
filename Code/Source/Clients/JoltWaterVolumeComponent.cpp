@@ -336,6 +336,14 @@ namespace JoltBuoyancy
         return m_waterVolume.GetDepthAt(worldPoint);
     }
 
+    float JoltWaterVolumeComponent::GetFoamAt(const AZ::Vector3& worldPoint) const
+    {
+        // Jacobian 1 is undisturbed, 0 is folded. Inverted and clamped so the value reads
+        // as "how much foam", which is what a VFX graph wants to multiply by.
+        const float jacobian = m_waterVolume.EvaluateSurface(worldPoint).m_jacobian;
+        return AZ::GetClamp(1.0f - jacobian, 0.0f, 1.0f);
+    }
+
     void JoltWaterVolumeComponent::DispatchWaterEvents()
     {
         m_waterVolume.TakePendingEvents(m_eventScratch);

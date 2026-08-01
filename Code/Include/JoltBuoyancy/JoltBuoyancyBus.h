@@ -240,6 +240,14 @@ namespace JoltBuoyancy
         //! How deep a world point sits below the surface, along the surface normal.
         //! Negative above it.
         virtual float GetDepthAt(const AZ::Vector3& worldPoint) const = 0;
+
+        //! How hard the surface is folding at a point, from 0 (calm) to 1 (breaking).
+        //!
+        //! Derived from the Jacobian of the wave displacement: below 1 the surface is
+        //! compressing toward a crest, and at 0 it has folded through itself, which is
+        //! where a real sea breaks and throws foam. This is the signal to drive crest foam
+        //! and spray from, and it comes free with the surface evaluation.
+        virtual float GetFoamAt(const AZ::Vector3& worldPoint) const = 0;
     };
 
     using JoltWaterVolumeRequestBus = AZ::EBus<JoltWaterVolumeRequests>;

@@ -3,6 +3,7 @@
 #include <AzCore/Console/IConsole.h>
 #include <AzCore/Interface/Interface.h>
 #include <AzCore/Math/MathUtils.h>
+#include <AzCore/std/limits.h>
 #include <AzCore/std/parallel/lock.h>
 
 #include <AzFramework/Physics/CollisionBus.h>
@@ -168,6 +169,24 @@ namespace JoltBuoyancy
         if (flat || sampleCount <= 1 || footprintRadius <= 0.01f)
         {
             return sampleAt(bodyPosition);
+        }
+
+        // Nor can a body much smaller than the waves straddle a crest - every sample lands
+        // on effectively the same patch of slope. Multi-sampling exists for hulls long
+        // enough to span a wave, and debris is usually the bulk of what is in the water,
+        // so skipping it there is most of the saving for none of the fidelity.
+        if (!customSurface)
+        {
+            float shortestWavelength = AZStd::numeric_limits<float>::max();
+            for (const JoltGerstnerComponent& component : waves.GetComponents())
+            {
+                shortestWavelength =
+                    AZ::GetMin(shortestWavelength, AZ::Constants::TwoPi / AZ::GetMax(component.m_waveNumber, 1.0e-4f));
+            }
+            if (footprintRadius * 2.0f < shortestWavelength * 0.25f)
+            {
+                return sampleAt(bodyPosition);
+            }
         }
 
         // Spread around the body's footprint in the volume's own horizontal plane, so the

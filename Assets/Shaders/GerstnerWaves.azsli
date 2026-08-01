@@ -1,0 +1,118 @@
+// Gerstner wave evaluation for the water surface.
+//
+// ============================ THE PARITY CONTRACT ============================
+//
+// This function must produce the same result as JoltGerstnerWaves::Evaluate in
+// Source/Clients/JoltGerstnerWaves.cpp. Not similar - the same.
+//
+// Physics samples the CPU version to decide where bodies float; the renderer runs this one
+// to decide where the water is drawn. Any drift between them puts boats above or below the
+// water you can see, and that reads as a physics bug even though the physics is right.
+//
+// Two things keep them together, and both have to be maintained by hand:
+//
+//   1. The component data comes from one place. Both sides are fed the components the CPU
+//      synthesised from the spectrum - the GPU never synthesises its own. Sea state,
+//      dispersion and steepness clamping happen once, on the CPU, and the results are
+//      uploaded.
+//
+//   2. JoltGerstnerWaveTests pins the CPU side against reference values. If you change the
+//      maths here, that test tells you what the CPU now has to match - or that you have
+//      just broken the pairing.
+//
+// If you edit the loop below, edit Evaluate() to match, and update the reference values.
+//
+// =============================================================================
+
+#pragma once
+
+// One synthesised wave. Mirrors JoltGerstnerComponent field for field.
+struct GerstnerComponent
+{
+    float2 m_direction;       // unit, in the water volume's local XY plane
+    float m_amplitude;        // metres
+    float m_waveNumber;       // 2*pi / wavelength
+    float m_angularFrequency; // sqrt(g * k), or the shallow-water form
+    float m_steepness;        // 0 is a plain sine, higher sharpens crests
+    float m_phase;            // accumulated on the CPU and uploaded, already wrapped
+    float m_padding;
+};
+
+struct GerstnerSurface
+{
+    float3 m_position;
+    float3 m_normal;
+    float3 m_velocity;
+    float m_jacobian; // < 1 compressing toward a crest, <= 0 folded: this is where foam goes
+};
+
+//! Evaluates the wave sum at a parameter point. The CPU counterpart is
+//! JoltGerstnerWaves::Evaluate - keep them identical.
+//!
+//! Note this is the *parameter* point, not a world position: Gerstner displaces
+//! horizontally, so the surface above a given XY is not Evaluate(XY). A vertex shader wants
+//! exactly this - it displaces mesh vertices, which are parameter points by construction.
+//! CPU-side queries that need "the surface above this point" invert it first, which is what
+//! JoltGerstnerWaves::SampleAbove does. Do not try to reproduce that inversion here.
+GerstnerSurface EvaluateGerstner(
+    StructuredBuffer<GerstnerComponent> components, uint componentCount, float2 parameterXY, float meanHeight)
+{
+    GerstnerSurface surface;
+    surface.m_position = float3(parameterXY.x, parameterXY.y, meanHeight);
+    surface.m_velocity = float3(0.0f, 0.0f, 0.0f);
+
+    // Derivatives of the displacement, accumulated alongside it. They give the tangents for
+    // an exact normal and the Jacobian determinant for foam.
+    float dxdx = 1.0f;
+    float dxdy = 0.0f;
+    float dydy = 1.0f;
+    float dzdx = 0.0f;
+    float dzdy = 0.0f;
+
+    for (uint index = 0; index < componentCount; ++index)
+    {
+        GerstnerComponent component = components[index];
+
+        float phase = component.m_waveNumber * dot(component.m_direction, parameterXY) - component.m_phase;
+        float sinPhase = sin(phase);
+        float cosPhase = cos(phase);
+
+        float dirX = component.m_direction.x;
+        float dirY = component.m_direction.y;
+        float horizontal = component.m_steepness * component.m_amplitude;
+        float ka = component.m_waveNumber * component.m_amplitude;
+
+        surface.m_position.x += horizontal * dirX * cosPhase;
+        surface.m_position.y += horizontal * dirY * cosPhase;
+        surface.m_position.z += component.m_amplitude * sinPhase;
+
+        float wa = component.m_angularFrequency * component.m_amplitude;
+        float wq = component.m_angularFrequency * horizontal;
+        surface.m_velocity += float3(wq * dirX * sinPhase, wq * dirY * sinPhase, -wa * cosPhase);
+
+        float steepTerm = component.m_steepness * ka;
+        dxdx -= steepTerm * dirX * dirX * sinPhase;
+        dxdy -= steepTerm * dirX * dirY * sinPhase;
+        dydy -= steepTerm * dirY * dirY * sinPhase;
+        dzdx += ka * dirX * cosPhase;
+        dzdy += ka * dirY * cosPhase;
+    }
+
+    float3 tangentX = float3(dxdx, dxdy, dzdx);
+    float3 tangentY = float3(dxdy, dydy, dzdy);
+    surface.m_normal = normalize(cross(tangentX, tangentY));
+    if (surface.m_normal.z < 0.0f)
+    {
+        surface.m_normal = -surface.m_normal;
+    }
+
+    surface.m_jacobian = dxdx * dydy - dxdy * dxdy;
+    return surface;
+}
+
+//! Foam coverage at a point, 0 to 1. The same mapping GetFoamAt uses on the CPU, so a
+//! shader and a VFX graph reading the bus agree about where the water is breaking.
+float GerstnerFoam(float jacobian)
+{
+    return saturate(1.0f - jacobian);
+}

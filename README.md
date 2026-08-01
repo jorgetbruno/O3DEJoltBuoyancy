@@ -77,20 +77,73 @@ surface. Settings are snapshotted under a mutex once per step, since gameplay ma
 them while `OnStep` reads. A volume can be a **box or a sphere**; a sphere is sized by
 its X dimension and its surface sits at the top, like a tank filled to the brim.
 
-### Waves, and arbitrary surfaces
+### The sea
 
-The surface is sampled **per body**, not once for the volume, which is what lets it be a
-wave rather than a plane: two boats on one swell sit at different heights and tilt with
-their own part of it. The wave is evaluated in the volume's local space, so it rides a
-tilted volume rather than ignoring the tilt, and its normal comes from three
-finite-difference taps. The phase advances from the step delta rather than a wall clock,
-so a paused game has a still surface, and it wraps each wave period so a float32 does not
-lose precision over a long session.
+Waves are synthesised from a **spectrum**, not authored one at a time. You give it a
+Beaufort force, a fetch, a wind direction and a spread; it produces a set of Gerstner
+components. That way the physical relationships hold by construction - author wavelengths
+and speeds by hand and it is easy to make a sea that reads as wrong without being able to
+say why.
 
-`SetSurfaceFunction` replaces the built-in surface entirely, for water that has to line
-up with something the gem knows nothing about. The volume still decides *which* bodies
-are considered, since that comes from its bounds - which are padded upward by the wave
-amplitude so a body riding a crest does not fall out of the query.
+Speeds are never authored. Each component takes its frequency from the deep-water
+dispersion relation, `ω² = gk`, so long swell outruns short chop. Give the spectrum a
+water depth and it uses the shallow form, `ω² = gk·tanh(kd)`, where long waves feel the
+bottom, slow and shorten - swell steepening as it runs into a beach.
+
+Gerstner rather than plain sine: points are dragged horizontally toward the crests, which
+sharpens peaks and broadens troughs. That is the visual signature of open water. It also
+means **the surface is not a heightfield** - the water above a given XY is not the wave
+evaluated at that XY, because the point that ends up there started somewhere else.
+`SampleAbove` inverts that displacement before evaluating. Skip it and boats sit visibly
+off the crests, leaning the wrong way on a steep face.
+
+Each component keeps its own phase, wrapped separately. There is no shared clock: with
+several incommensurate periods there is nothing to wrap one to, so it would either lose
+float32 precision over a long session or jump the surface at every wrap.
+
+The surface is sampled at **several points across each body** and a plane fitted through
+them. One sample at the centre of mass gives a hull the water under its middle and nothing
+else, so a boat long enough to straddle a crest rises and falls without pitching. Bodies
+much smaller than the shortest wave skip this - they cannot straddle anything.
+
+Water has **orbital velocity**: it moves with the wave at a crest and against it in a
+trough. That is what makes a boat surge down the face of a swell and flotsam gather in
+lines. It is computed analytically alongside the displacement and added to the volume's
+own current per body.
+
+`SetSurfaceFunction` replaces the built-in surface entirely, for water that has to line up
+with something the gem knows nothing about. The volume still decides *which* bodies are
+considered, since that comes from its bounds - which are padded by the summed wave
+amplitude and the horizontal displacement, so a body riding a crest does not fall out of
+the broadphase query.
+
+**Why a spectrum and not a component list.** An FFT ocean consumes the same thing:
+Tessendorf synthesis runs over a Phillips or JONSWAP spectrum. Swapping the Gerstner sum
+for an FFT later replaces the synthesis and leaves the authored data, the editor UI, the
+bus and the tests standing. A hand-authored component array would have had to be thrown
+away. A Gerstner sum tops out around 8-16 components and gets you *convincing*; FFT gets
+you *photoreal* and moves the physics onto a readback texture or a low-res CPU FFT, routed
+through `SetSurfaceFunction`.
+
+### Hydrodynamics
+
+Jolt does more here than it is usually given credit for. Its drag is **already quadratic** -
+its own comment says "instead of eq 2.5.14 we use a quadratic drag formula" - and it is
+**already directional**, projecting the body's local bounding box along the flow, so a long
+hull presents less area end-on than broadside.
+
+What a bounding box cannot express is a hull being far more streamlined than its box, which
+is most hulls. The override carries a per-axis scale that refines Jolt's figure: Jolt is
+handed the isotropic floor of the three axes, and the remainder is applied in the same
+quadratic, area-projected form. That split is approximate - each half clamps independently,
+and Jolt applies at the centre of buoyancy while the remainder applies at the centre of
+mass - so setting all three axes alike does not exactly reproduce an unsplit drag. The
+anisotropy is the point.
+
+**Added mass** is genuinely missing from Jolt and is approximated. Doing it properly means
+adding to the solver's mass matrix, which Jolt does not expose, so this resists the change
+in velocity after the fact. It damps acceleration rather than making the body heavier. That
+is the honest description and it is labelled as such everywhere it appears.
 
 ### Who owns a body
 
@@ -103,6 +156,17 @@ frame. A body whose centre sits in a neighbour is left to that neighbour even wh
 still overlaps this volume's box, which is the straddling case. Ownership sticks unless a
 neighbour holds the body meaningfully deeper (`OwnershipHysteresis`), so a body drifting
 along a seam does not change hands every few steps.
+
+### Extent
+
+A volume is a **box**, a **sphere**, or a **plane** - everything below the surface within a
+horizontal extent, with no floor. An ocean is not a box: a body that sinks out of the
+bottom of one abruptly weighs its full dry weight again.
+
+Nor can an ocean be one enormous box, because the broadphase is queried with its bounds. A
+volume can **follow an entity**, recentring horizontally each frame so the queried region
+stays small while the water reads as unbounded. Horizontal only - moving the surface with
+the camera would make the sea rise and fall as the player travels.
 
 ### Sleeping bodies
 
@@ -199,7 +263,7 @@ cmd /c "C:\Users\jorge\O3DE\Projects\JoltPhysicsTest\build-env.cmd cmake --build
 
 ```
 cd build\windows\bin\profile
-.\AzTestRunner.exe JoltBuoyancy.Tests.dll AzRunUnitTests    # 44 tests
+.\AzTestRunner.exe JoltBuoyancy.Tests.dll AzRunUnitTests    # 66 tests
 ```
 
 Check the process exit code, not the console text.
@@ -241,11 +305,16 @@ would end up exactly where it does. Bodies are 1 m³ boxes, so mass *is* density
   containment test plus a surface function, not a Jolt body, so an arbitrary mesh would
   need point-in-mesh queries this gem does not have. A real rendered surface from Atom's
   water rendering is also unimplemented — the drawing here is debug geometry.
-- **Ownership between overlapping volumes is a hard switch** once the hysteresis margin
-  is crossed. A body crossing from a river into a pool changes current and density in one
-  step rather than blending across the boundary.
-- **One wave train.** The built-in surface is a single sine; anything richer needs
-  `SetSurfaceFunction`.
+- **No rendered water surface.** `Assets/Shaders/GerstnerWaves.azsli` implements the same
+  wave function for a vertex shader and documents the parity contract, but **nothing is
+  wired into Atom** - no material, no render feature, no mesh. The drawing you see is debug
+  geometry. This is the largest outstanding piece of work.
+- **Shoreline is one depth per volume.** Water depth shortens the long waves, which is the
+  physics behind shoaling, but a real shoreline needs a depth that varies with the sea
+  floor - terrain access the gem does not have and should not take on speculatively.
+- **A Gerstner sum, not an FFT.** Convincing rather than photoreal; see above for what
+  switching would cost.
+- **Added mass is an approximation**, as described above.
 - **Buoyancy applies to dynamic bodies only**, by design (a static body in water is a
   pier, not a boat).
 
@@ -267,15 +336,19 @@ would end up exactly where it does. Bodies are 1 m³ boxes, so mass *is* density
 tests predict — this is the confirmation the notes this file replaced were still waiting
 on, and it closes the last gap between "the maths is right" and "the feature works".
 
-**Also verified:** the gem and its editor module build; 44/44 unit tests pass against a
+**Also verified:** the gem and its editor module build; 66/66 unit tests pass against a
 real Jolt world; the level prefab is valid with the right editor components and masses;
 the game launcher loads the level and simulates it for 30 s with no crash, exercising
 the `Activate` → `AddStepListener` path that used to crash.
 
 **Not observed in the editor:** the box component mode's drag handles, the edit-mode
-preview (water simulating in the Edit viewport), the tessellated wave surface, and the
-sea and hull lanes added to the test level. Those build and are covered by unit tests
-wherever a unit test can reach them, but none has been looked at.
+preview, the tessellated wave surface, the sea and hull lanes in the test level, and every
+part of the sea model added since. All of it builds and is covered by unit tests wherever a
+unit test can reach, but none of it has been looked at.
+
+**Not run at all:** the shader in `Assets/Shaders/`. It is written against the same spec as
+the CPU evaluation and the parity contract is documented at the top of the file, but there
+is no Atom material or render feature to run it, and no way to verify it here.
 
 ## License
 

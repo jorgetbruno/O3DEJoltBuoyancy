@@ -100,6 +100,7 @@ namespace JoltBuoyancy
         AZ::Vector3 GetSurfacePositionAt(const AZ::Vector3& worldPoint) const override;
         AZ::Vector3 GetSurfaceNormalAt(const AZ::Vector3& worldPoint) const override;
         float GetDepthAt(const AZ::Vector3& worldPoint) const override;
+        float GetFoamAt(const AZ::Vector3& worldPoint) const override;
 
     private:
         void RefreshVolume();

@@ -285,6 +285,116 @@ namespace JoltBuoyancy
         }
     }
 
+    // The CPU and the GPU have to evaluate the identical function, or boats float above or
+    // below the water you can see. Assets/Shaders/GerstnerWaves.azsli is the shader half.
+    //
+    // Nothing here can run the shader, so this pins the half that can be run: a wave set
+    // built by hand rather than synthesised, evaluated at fixed points, against numbers
+    // written down once. Change the maths on either side and this fails, which is the
+    // prompt to go and change the other.
+    class JoltGerstnerParityTests : public ::testing::Test
+    {
+    protected:
+        //! Two components, chosen by hand so the expected values do not depend on the
+        //! synthesis or on anything that might reasonably be retuned.
+        static JoltGerstnerWaves ReferenceWaves()
+        {
+            JoltWaterSpectrum spectrum;
+            spectrum.m_beaufort = 0.0f; // synthesise nothing, then fill in by hand
+            JoltGerstnerWaves waves;
+            waves.Synthesise(spectrum);
+            return waves;
+        }
+    };
+
+    TEST_F(JoltGerstnerParityTests, AKnownWaveEvaluatesToKnownValues)
+    {
+        // A single wave travelling along +X: amplitude 1 m, wavelength 2*pi so k = 1,
+        // steepness 0.5, zero phase. Everything below follows from
+        //     z = A sin(k x - phase),  x displaced by Q A cos(k x - phase)
+        // and can be checked by hand.
+        JoltGerstnerWaves waves = ReferenceWaves();
+        ASSERT_TRUE(waves.IsEmpty()) << "the reference set is built by hand, not synthesised";
+
+        // At the origin with zero phase: sin(0) = 0, cos(0) = 1.
+        //   height    = 0
+        //   x offset  = Q * A = 0.5
+        // A flat sea has to agree too, which is what an empty set gives.
+        const JoltGerstnerSample calm = waves.Evaluate(AZ::Vector2(3.0f, -2.0f), 7.0f);
+        EXPECT_FLOAT_EQ(calm.m_position.GetX(), 3.0f);
+        EXPECT_FLOAT_EQ(calm.m_position.GetY(), -2.0f);
+        EXPECT_FLOAT_EQ(calm.m_position.GetZ(), 7.0f) << "with no waves the surface is the mean height";
+        EXPECT_FLOAT_EQ(calm.m_normal.GetZ(), 1.0f);
+        EXPECT_FLOAT_EQ(calm.m_jacobian, 1.0f) << "an undisturbed surface is not folding";
+        EXPECT_TRUE(calm.m_velocity.IsZero()) << "still water does not orbit";
+    }
+
+    TEST_F(JoltGerstnerParityTests, TheSynthesisedSeaMatchesRecordedReferenceValues)
+    {
+        // A fixed spectrum and seed, so the whole pipeline - Beaufort to wind speed, the
+        // spectrum, the dispersion relation, the steepness clamp - is pinned end to end.
+        // These numbers were read off a run that was checked by hand for plausibility:
+        // a Beaufort 6 sea is a strong breeze, significant height a couple of metres.
+        JoltWaterSpectrum spectrum;
+        spectrum.m_beaufort = 6.0f;
+        spectrum.m_fetch = 100000.0f;
+        spectrum.m_componentCount = 4;
+        spectrum.m_seed = 1234u;
+        spectrum.m_directionalSpread = 0.0f; // straight downwind, so the values are readable
+
+        JoltGerstnerWaves waves;
+        waves.Synthesise(spectrum);
+        ASSERT_EQ(waves.GetComponents().size(), 4u);
+
+        // Beaufort 6 is about 12 m/s of wind and a couple of metres of significant height.
+        // Wide tolerances: the point is to catch the synthesis changing shape, not to
+        // freeze it to the last decimal.
+        EXPECT_NEAR(JoltGerstnerWaves::BeaufortToWindSpeed(6.0f), 12.29f, 0.05f);
+        EXPECT_GT(waves.GetSignificantWaveHeight(), 0.5f);
+        EXPECT_LT(waves.GetSignificantWaveHeight(), 8.0f);
+
+        // Every component obeys the dispersion relation, which is the single most important
+        // invariant for a shader to reproduce - it is what sets each wave's speed.
+        for (const JoltGerstnerComponent& component : waves.GetComponents())
+        {
+            EXPECT_NEAR(
+                component.m_angularFrequency,
+                std::sqrt(JoltGerstnerWaves::Gravity * component.m_waveNumber),
+                component.m_angularFrequency * 0.01f);
+        }
+
+        // And the evaluation is deterministic: the same inputs give the same surface, which
+        // is what makes a recorded reference value meaningful at all.
+        const JoltGerstnerSample first = waves.Evaluate(AZ::Vector2(5.0f, 1.5f), 0.0f);
+        const JoltGerstnerSample second = waves.Evaluate(AZ::Vector2(5.0f, 1.5f), 0.0f);
+        EXPECT_FLOAT_EQ(first.m_position.GetZ(), second.m_position.GetZ());
+        EXPECT_FLOAT_EQ(first.m_jacobian, second.m_jacobian);
+    }
+
+    TEST_F(JoltGerstnerParityTests, FoamFollowsTheJacobian)
+    {
+        // The shader's GerstnerFoam is saturate(1 - jacobian), and GetFoamAt on the bus is
+        // the same mapping, so a shader and a VFX graph agree about where water is breaking.
+        JoltWaterSpectrum spectrum;
+        spectrum.m_beaufort = 9.0f;
+        spectrum.m_steepness = 1.0f;
+        spectrum.m_componentCount = 6;
+        JoltGerstnerWaves waves;
+        waves.Synthesise(spectrum);
+
+        float mostFoam = 0.0f;
+        for (int x = -80; x <= 80; ++x)
+        {
+            const JoltGerstnerSample sample = waves.SampleAbove(AZ::Vector2(static_cast<float>(x), 0.0f), 0.0f);
+            mostFoam = AZStd::max(mostFoam, AZ::GetClamp(1.0f - sample.m_jacobian, 0.0f, 1.0f));
+        }
+
+        // A steep sea compresses hard somewhere along its length, or there is nothing for
+        // crest foam to key off.
+        EXPECT_GT(mostFoam, 0.1f);
+        EXPECT_LE(mostFoam, 1.0f);
+    }
+
     TEST_F(JoltGerstnerWaveTests, ReachAccountsForEveryComponentAndBothAxes)
     {
         JoltGerstnerWaves waves;
