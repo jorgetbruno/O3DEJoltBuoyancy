@@ -29,7 +29,8 @@ namespace JoltBuoyancy
             using JoltWaterVolumeComponent::GetSubmergedBodyCount;
             using JoltWaterVolumeComponent::GetSubmergedFraction;
             using JoltWaterVolumeComponent::GetWaterSettings;
-            using JoltWaterVolumeComponent::GetWaveAmplitude;
+            using JoltWaterVolumeComponent::GetSeaState;
+            using JoltWaterVolumeComponent::GetSignificantWaveHeight;
             using JoltWaterVolumeComponent::GetWavesEnabled;
             using JoltWaterVolumeComponent::SetAngularDrag;
             using JoltWaterVolumeComponent::SetDimensions;
@@ -37,7 +38,7 @@ namespace JoltBuoyancy
             using JoltWaterVolumeComponent::SetFluidVelocity;
             using JoltWaterVolumeComponent::SetLinearDrag;
             using JoltWaterVolumeComponent::SetWaterSettings;
-            using JoltWaterVolumeComponent::SetWaveAmplitude;
+            using JoltWaterVolumeComponent::SetSeaState;
             using JoltWaterVolumeComponent::SetWavesEnabled;
         };
     } // namespace
@@ -54,12 +55,12 @@ namespace JoltBuoyancy
         m_component.AccessDimensions() = AZ::Vector3(4.0f, 5.0f, 6.0f);
         m_component.AccessSettings().m_fluidDensity = 1234.0f;
         m_component.AccessSettings().m_wavesEnabled = true;
-        m_component.AccessSettings().m_waveAmplitude = 0.75f;
+        m_component.AccessSettings().m_spectrum.m_beaufort = 6.0f;
 
         EXPECT_EQ(m_component.GetDimensions(), AZ::Vector3(4.0f, 5.0f, 6.0f));
         EXPECT_FLOAT_EQ(m_component.GetFluidDensity(), 1234.0f);
         EXPECT_TRUE(m_component.GetWavesEnabled());
-        EXPECT_FLOAT_EQ(m_component.GetWaveAmplitude(), 0.75f);
+        EXPECT_FLOAT_EQ(m_component.GetSeaState(), 6.0f);
     }
 
     TEST_F(JoltWaterVolumeComponentTests, SettersRoundTrip)
@@ -70,7 +71,7 @@ namespace JoltBuoyancy
         m_component.SetFluidVelocity(AZ::Vector3(1.0f, 2.0f, 3.0f));
         m_component.SetDimensions(AZ::Vector3(7.0f, 8.0f, 9.0f));
         m_component.SetWavesEnabled(true);
-        m_component.SetWaveAmplitude(1.5f);
+        m_component.SetSeaState(7.0f);
 
         EXPECT_FLOAT_EQ(m_component.GetFluidDensity(), 800.0f);
         EXPECT_FLOAT_EQ(m_component.GetLinearDrag(), 3.0f);
@@ -78,7 +79,7 @@ namespace JoltBuoyancy
         EXPECT_EQ(m_component.GetFluidVelocity(), AZ::Vector3(1.0f, 2.0f, 3.0f));
         EXPECT_EQ(m_component.GetDimensions(), AZ::Vector3(7.0f, 8.0f, 9.0f));
         EXPECT_TRUE(m_component.GetWavesEnabled());
-        EXPECT_FLOAT_EQ(m_component.GetWaveAmplitude(), 1.5f);
+        EXPECT_FLOAT_EQ(m_component.GetSeaState(), 7.0f);
     }
 
     TEST_F(JoltWaterVolumeComponentTests, WholeSettingsGoInAndComeBackOut)
@@ -87,7 +88,7 @@ namespace JoltBuoyancy
         settings.m_fluidDensity = 1025.0f; // sea water
         settings.m_linearDrag = 2.0f;
         settings.m_wavesEnabled = true;
-        settings.m_waveLength = 12.0f;
+        settings.m_spectrum.m_beaufort = 8.0f;
         settings.m_reportSubmergedFraction = true;
 
         m_component.SetWaterSettings(settings);
@@ -96,7 +97,7 @@ namespace JoltBuoyancy
         EXPECT_FLOAT_EQ(readBack.m_fluidDensity, 1025.0f);
         EXPECT_FLOAT_EQ(readBack.m_linearDrag, 2.0f);
         EXPECT_TRUE(readBack.m_wavesEnabled);
-        EXPECT_FLOAT_EQ(readBack.m_waveLength, 12.0f);
+        EXPECT_FLOAT_EQ(readBack.m_spectrum.m_beaufort, 8.0f);
         EXPECT_TRUE(readBack.m_reportSubmergedFraction);
     }
 

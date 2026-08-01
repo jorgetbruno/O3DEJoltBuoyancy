@@ -33,6 +33,56 @@ namespace JoltBuoyancy
         Sphere = 1,
     };
 
+    //! A sea described the way oceanography describes one, rather than as a list of waves.
+    //!
+    //! Authoring a spectrum rather than individual wave components is deliberate. The
+    //! components are synthesised from it, so the physical relationships hold by
+    //! construction: long waves travel faster than short ones, and amplitudes fall off with
+    //! frequency the way a real wind sea does. Author the components by hand and it is easy
+    //! to produce a sea that reads as wrong without being able to say why.
+    //!
+    //! It is also the schema an FFT ocean would consume. Tessendorf synthesis runs over a
+    //! Phillips or JONSWAP spectrum, which is what this describes, so swapping the Gerstner
+    //! sum for an FFT later replaces the synthesis without disturbing the authored data,
+    //! the editor UI, the bus or the tests.
+    struct JoltWaterSpectrum
+    {
+        AZ_CLASS_ALLOCATOR(JoltWaterSpectrum, AZ::SystemAllocator);
+        AZ_TYPE_INFO(JoltWaterSpectrum, "{2E7A9C41-5B8D-4E3F-A16C-8D4B2F7E9A31}");
+
+        static void Reflect(AZ::ReflectContext* context);
+
+        //! Beaufort force, 0 (glassy) to 12 (hurricane). One number for the whole sea
+        //! state, which is what makes a weather transition a single lerp.
+        float m_beaufort = 4.0f;
+
+        //! How far the wind has blown across open water, in metres. Short fetch gives a
+        //! choppy, short-wavelength sea however hard the wind blows - the difference
+        //! between a lake in a gale and an ocean swell.
+        float m_fetch = 50000.0f;
+
+        //! Wind direction in the volume's local XY plane. Waves travel along it.
+        AZ::Vector2 m_windDirection = AZ::Vector2(1.0f, 0.0f);
+
+        //! How far components fan out either side of the wind, in radians. Zero gives a
+        //! corduroy sea of parallel ridges; real water spreads.
+        float m_directionalSpread = 0.6f;
+
+        //! How many Gerstner components to synthesise. More is smoother and costs linearly
+        //! on every surface sample.
+        AZ::u32 m_componentCount = 6;
+
+        //! Art control on top of the physical result. Amplitude scales wave height,
+        //! steepness sharpens crests (1 is the limit before the surface self-intersects),
+        //! and speed scales the whole sea's motion without changing its shape.
+        float m_amplitudeScale = 1.0f;
+        float m_steepness = 0.7f;
+        float m_speedScale = 1.0f;
+
+        //! Makes synthesis repeatable, so the same spectrum gives the same sea every run.
+        AZ::u32 m_seed = 12345;
+    };
+
     //! Settings describing a body of water.
     struct JoltWaterVolumeSettings
     {
@@ -50,17 +100,22 @@ namespace JoltBuoyancy
         float m_angularDrag = 0.05f;
         AZ::Vector3 m_fluidVelocity = AZ::Vector3::CreateZero();
 
-        //! Ripples the surface instead of leaving it a flat plane. The wave rides the
+        //! Ripples the surface instead of leaving it a flat plane. The waves ride the
         //! volume's own surface, so a tilted volume gets a tilted, moving surface.
         bool m_wavesEnabled = false;
-        //! Crest-to-flat height, in metres.
-        float m_waveAmplitude = 0.25f;
-        //! Distance between crests, in metres.
-        float m_waveLength = 6.0f;
-        //! How fast crests travel, in metres per second.
-        float m_waveSpeed = 1.5f;
-        //! Travel direction in the volume's local XY plane.
-        AZ::Vector2 m_waveDirection = AZ::Vector2(1.0f, 0.0f);
+
+        //! The sea state the waves are synthesised from.
+        JoltWaterSpectrum m_spectrum;
+
+        //! How many points across a body's footprint the surface is sampled at, before
+        //! fitting a plane through them for the solver.
+        //!
+        //! One sample means a hull only ever sees the water under its centre, so a boat
+        //! long enough to straddle a crest translates up and down without pitching. Four
+        //! is enough to make a hull ride a swell; more costs a full surface evaluation per
+        //! sample per body per step. Ignored on a flat surface, where every sample would
+        //! return the same plane.
+        AZ::u32 m_surfaceSamplesPerBody = 4;
 
         //! Which bodies the volume even looks at. Bodies the group excludes are skipped
         //! before any impulse is computed, so a volume can be made to affect only, say,
@@ -113,18 +168,32 @@ namespace JoltBuoyancy
         virtual void SetWaterSettings(const JoltWaterVolumeSettings& settings) = 0;
         virtual JoltWaterVolumeSettings GetWaterSettings() const = 0;
 
-        //! Surface waves. Amplitude and length are in metres, speed in metres per second,
-        //! direction is in the volume's local XY plane.
+        //! Surface waves, on or off.
         virtual void SetWavesEnabled(bool enabled) = 0;
         virtual bool GetWavesEnabled() const = 0;
-        virtual void SetWaveAmplitude(float amplitude) = 0;
-        virtual float GetWaveAmplitude() const = 0;
-        virtual void SetWaveLength(float length) = 0;
-        virtual float GetWaveLength() const = 0;
-        virtual void SetWaveSpeed(float speed) = 0;
-        virtual float GetWaveSpeed() const = 0;
-        virtual void SetWaveDirection(const AZ::Vector2& direction) = 0;
-        virtual AZ::Vector2 GetWaveDirection() const = 0;
+
+        //! The sea state. Setting a spectrum resynthesises the wave components, so this is
+        //! how weather changes: lerp the Beaufort number and set it each frame.
+        virtual void SetSpectrum(const JoltWaterSpectrum& spectrum) = 0;
+        virtual JoltWaterSpectrum GetSpectrum() const = 0;
+
+        //! Beaufort force on its own, for the common case of "make the sea rougher".
+        virtual void SetSeaState(float beaufort) = 0;
+        virtual float GetSeaState() const = 0;
+
+        //! Wind direction in the volume's local XY plane.
+        virtual void SetWindDirection(const AZ::Vector2& direction) = 0;
+        virtual AZ::Vector2 GetWindDirection() const = 0;
+
+        //! Significant wave height for the current spectrum, in metres - the average of
+        //! the highest third, which is what a forecast quotes. Read-only: it falls out of
+        //! the sea state rather than being authored.
+        virtual float GetSignificantWaveHeight() const = 0;
+
+        //! Velocity of the water at a point, including the orbital motion of the waves.
+        //! At a crest the water moves with the wave and in a trough against it, which is
+        //! what makes flotsam gather in lines along the swell.
+        virtual AZ::Vector3 GetWaterVelocityAt(const AZ::Vector3& worldPoint) const = 0;
 
         //! Stops or resumes applying buoyancy without removing the component.
         virtual void SetEnabled(bool enabled) = 0;

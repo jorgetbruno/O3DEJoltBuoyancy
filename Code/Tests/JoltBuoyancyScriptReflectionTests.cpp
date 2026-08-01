@@ -48,8 +48,10 @@ namespace JoltBuoyancy
         ExpectBusHasEvents("JoltWaterVolumeRequestBus",
             { "SetFluidDensity", "GetFluidDensity", "SetLinearDrag", "GetLinearDrag", "SetAngularDrag",
               "GetAngularDrag", "SetFluidVelocity", "GetFluidVelocity", "SetDimensions", "GetDimensions",
-              "SetWaterSettings", "GetWaterSettings", "SetWavesEnabled", "GetWavesEnabled", "SetWaveAmplitude",
-              "GetWaveAmplitude", "SetEnabled", "IsEnabled", "GetSubmergedBodyCount", "GetSubmergedFraction" });
+              "SetWaterSettings", "GetWaterSettings", "SetWavesEnabled", "GetWavesEnabled",
+              "SetSpectrum", "GetSpectrum", "SetSeaState", "GetSeaState", "SetWindDirection", "GetWindDirection",
+              "GetSignificantWaveHeight", "GetWaterVelocityAt",
+              "SetEnabled", "IsEnabled", "GetSubmergedBodyCount", "GetSubmergedFraction" });
     }
 
     TEST_F(JoltBuoyancyScriptReflectionTests, BuoyancyOverrideBusIsReflected)
@@ -76,7 +78,7 @@ namespace JoltBuoyancy
 
         const AZ::BehaviorClass* settingsClass = found->second;
         for (const char* propertyName : { "fluidDensity", "linearDrag", "angularDrag", "fluidVelocity",
-                                          "wavesEnabled", "waveAmplitude", "waveLength", "waveSpeed" })
+                                          "wavesEnabled", "spectrum", "surfaceSamplesPerBody" })
         {
             EXPECT_NE(settingsClass->m_properties.find(propertyName), settingsClass->m_properties.end())
                 << "JoltWaterVolumeSettings is missing the property " << propertyName;

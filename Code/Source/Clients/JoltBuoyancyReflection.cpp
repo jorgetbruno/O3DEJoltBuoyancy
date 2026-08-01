@@ -33,8 +33,91 @@ namespace JoltBuoyancy
         }
     };
 
+    void JoltWaterSpectrum::Reflect(AZ::ReflectContext* context)
+    {
+        if (auto* serializeContext = azrtti_cast<AZ::SerializeContext*>(context))
+        {
+            serializeContext->Class<JoltWaterSpectrum>()
+                ->Version(1)
+                ->Field("Beaufort", &JoltWaterSpectrum::m_beaufort)
+                ->Field("Fetch", &JoltWaterSpectrum::m_fetch)
+                ->Field("WindDirection", &JoltWaterSpectrum::m_windDirection)
+                ->Field("DirectionalSpread", &JoltWaterSpectrum::m_directionalSpread)
+                ->Field("ComponentCount", &JoltWaterSpectrum::m_componentCount)
+                ->Field("AmplitudeScale", &JoltWaterSpectrum::m_amplitudeScale)
+                ->Field("Steepness", &JoltWaterSpectrum::m_steepness)
+                ->Field("SpeedScale", &JoltWaterSpectrum::m_speedScale)
+                ->Field("Seed", &JoltWaterSpectrum::m_seed)
+                ;
+
+            if (AZ::EditContext* editContext = serializeContext->GetEditContext())
+            {
+                editContext->Class<JoltWaterSpectrum>("Sea State", "")
+                    ->ClassElement(AZ::Edit::ClassElements::EditorData, "")
+                        ->Attribute(AZ::Edit::Attributes::AutoExpand, true)
+                    ->DataElement(AZ::Edit::UIHandlers::Slider, &JoltWaterSpectrum::m_beaufort,
+                        "Beaufort", "0 is glassy calm, 4 a moderate breeze, 8 a gale, 12 a hurricane. One number for "
+                        "the whole sea, so a weather change is a single lerp.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
+                        ->Attribute(AZ::Edit::Attributes::Max, 12.0f)
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterSpectrum::m_fetch,
+                        "Fetch", "How far the wind has blown across open water. A short fetch gives a choppy, "
+                        "short-wavelength sea however hard the wind blows.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 1.0f)
+                        ->Attribute(AZ::Edit::Attributes::Suffix, " m")
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterSpectrum::m_windDirection,
+                        "Wind direction", "In the volume's local XY plane. Waves travel along it.")
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterSpectrum::m_directionalSpread,
+                        "Directional spread", "How far waves fan out either side of the wind. Zero gives parallel "
+                        "ridges, which no real sea has.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
+                        ->Attribute(AZ::Edit::Attributes::Max, 3.14f)
+                        ->Attribute(AZ::Edit::Attributes::Suffix, " rad")
+                    ->DataElement(AZ::Edit::UIHandlers::Slider, &JoltWaterSpectrum::m_componentCount,
+                        "Components", "How many waves are synthesised. More is smoother and costs linearly on every "
+                        "surface sample.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 1)
+                        ->Attribute(AZ::Edit::Attributes::Max, 32)
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterSpectrum::m_amplitudeScale,
+                        "Amplitude scale", "Art control on wave height, on top of the physical spectrum.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
+                    ->DataElement(AZ::Edit::UIHandlers::Slider, &JoltWaterSpectrum::m_steepness,
+                        "Steepness", "Sharpens crests and broadens troughs. 1 is the limit before the surface folds "
+                        "over itself; the synthesis scales it down if the components together would exceed that.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
+                        ->Attribute(AZ::Edit::Attributes::Max, 1.0f)
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterSpectrum::m_speedScale,
+                        "Speed scale", "Scales the whole sea's motion without changing its shape. Wave speeds "
+                        "themselves come from the dispersion relation and are not authored.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterSpectrum::m_seed,
+                        "Seed", "Makes the sea repeatable run to run.")
+                    ;
+            }
+        }
+
+        if (auto* behaviorContext = azrtti_cast<AZ::BehaviorContext*>(context))
+        {
+            behaviorContext->Class<JoltWaterSpectrum>("JoltWaterSpectrum")
+                ->Attribute(AZ::Script::Attributes::Category, "Jolt Physics")
+                ->Attribute(AZ::Script::Attributes::Scope, AZ::Script::Attributes::ScopeFlags::Common)
+                ->Property("beaufort", BehaviorValueProperty(&JoltWaterSpectrum::m_beaufort))
+                ->Property("fetch", BehaviorValueProperty(&JoltWaterSpectrum::m_fetch))
+                ->Property("windDirection", BehaviorValueProperty(&JoltWaterSpectrum::m_windDirection))
+                ->Property("directionalSpread", BehaviorValueProperty(&JoltWaterSpectrum::m_directionalSpread))
+                ->Property("componentCount", BehaviorValueProperty(&JoltWaterSpectrum::m_componentCount))
+                ->Property("amplitudeScale", BehaviorValueProperty(&JoltWaterSpectrum::m_amplitudeScale))
+                ->Property("steepness", BehaviorValueProperty(&JoltWaterSpectrum::m_steepness))
+                ->Property("speedScale", BehaviorValueProperty(&JoltWaterSpectrum::m_speedScale))
+                ->Property("seed", BehaviorValueProperty(&JoltWaterSpectrum::m_seed))
+                ;
+        }
+    }
+
     void JoltWaterVolumeSettings::Reflect(AZ::ReflectContext* context)
     {
+        JoltWaterSpectrum::Reflect(context);
+
         if (auto* serializeContext = azrtti_cast<AZ::SerializeContext*>(context))
         {
             serializeContext->Class<JoltWaterVolumeSettings>()
@@ -44,10 +127,8 @@ namespace JoltBuoyancy
                 ->Field("AngularDrag", &JoltWaterVolumeSettings::m_angularDrag)
                 ->Field("FluidVelocity", &JoltWaterVolumeSettings::m_fluidVelocity)
                 ->Field("WavesEnabled", &JoltWaterVolumeSettings::m_wavesEnabled)
-                ->Field("WaveAmplitude", &JoltWaterVolumeSettings::m_waveAmplitude)
-                ->Field("WaveLength", &JoltWaterVolumeSettings::m_waveLength)
-                ->Field("WaveSpeed", &JoltWaterVolumeSettings::m_waveSpeed)
-                ->Field("WaveDirection", &JoltWaterVolumeSettings::m_waveDirection)
+                ->Field("Spectrum", &JoltWaterVolumeSettings::m_spectrum)
+                ->Field("SurfaceSamplesPerBody", &JoltWaterVolumeSettings::m_surfaceSamplesPerBody)
                 ->Field("CollisionGroupId", &JoltWaterVolumeSettings::m_collisionGroupId)
                 ->Field("ReportSubmergedFraction", &JoltWaterVolumeSettings::m_reportSubmergedFraction)
                 ->Field("Shape", &JoltWaterVolumeSettings::m_shape)
@@ -80,22 +161,15 @@ namespace JoltBuoyancy
                     ->DataElement(AZ::Edit::UIHandlers::CheckBox, &JoltWaterVolumeSettings::m_wavesEnabled,
                         "Waves", "Ripple the surface instead of leaving it flat. The wave rides the volume's own "
                         "surface, so a tilted volume gets a tilted moving surface.")
-                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_waveAmplitude,
-                        "Wave amplitude", "Crest height above the flat surface.")
-                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
-                        ->Attribute(AZ::Edit::Attributes::Suffix, " m")
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_spectrum,
+                        "Sea state", "The spectrum the waves are synthesised from")
                         ->Attribute(AZ::Edit::Attributes::Visibility, &JoltWaterVolumeSettings::m_wavesEnabled)
-                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_waveLength,
-                        "Wave length", "Distance between crests.")
-                        ->Attribute(AZ::Edit::Attributes::Min, 0.01f)
-                        ->Attribute(AZ::Edit::Attributes::Suffix, " m")
-                        ->Attribute(AZ::Edit::Attributes::Visibility, &JoltWaterVolumeSettings::m_wavesEnabled)
-                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_waveSpeed,
-                        "Wave speed", "How fast crests travel.")
-                        ->Attribute(AZ::Edit::Attributes::Suffix, " m/s")
-                        ->Attribute(AZ::Edit::Attributes::Visibility, &JoltWaterVolumeSettings::m_wavesEnabled)
-                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_waveDirection,
-                        "Wave direction", "Travel direction, in the volume's local XY plane.")
+                    ->DataElement(AZ::Edit::UIHandlers::Slider, &JoltWaterVolumeSettings::m_surfaceSamplesPerBody,
+                        "Surface samples per body", "How many points across a body the surface is sampled at before "
+                        "fitting a plane. One means a hull only sees the water under its centre, so a boat long "
+                        "enough to straddle a crest never pitches on it.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 1)
+                        ->Attribute(AZ::Edit::Attributes::Max, 16)
                         ->Attribute(AZ::Edit::Attributes::Visibility, &JoltWaterVolumeSettings::m_wavesEnabled)
                     ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_collisionGroupId,
                         "Collides with", "Which bodies this water affects. Bodies the group excludes are skipped "
@@ -122,10 +196,8 @@ namespace JoltBuoyancy
                 ->Property("angularDrag", BehaviorValueProperty(&JoltWaterVolumeSettings::m_angularDrag))
                 ->Property("fluidVelocity", BehaviorValueProperty(&JoltWaterVolumeSettings::m_fluidVelocity))
                 ->Property("wavesEnabled", BehaviorValueProperty(&JoltWaterVolumeSettings::m_wavesEnabled))
-                ->Property("waveAmplitude", BehaviorValueProperty(&JoltWaterVolumeSettings::m_waveAmplitude))
-                ->Property("waveLength", BehaviorValueProperty(&JoltWaterVolumeSettings::m_waveLength))
-                ->Property("waveSpeed", BehaviorValueProperty(&JoltWaterVolumeSettings::m_waveSpeed))
-                ->Property("waveDirection", BehaviorValueProperty(&JoltWaterVolumeSettings::m_waveDirection))
+                ->Property("spectrum", BehaviorValueProperty(&JoltWaterVolumeSettings::m_spectrum))
+                ->Property("surfaceSamplesPerBody", BehaviorValueProperty(&JoltWaterVolumeSettings::m_surfaceSamplesPerBody))
                 ->Property("reportSubmergedFraction", BehaviorValueProperty(&JoltWaterVolumeSettings::m_reportSubmergedFraction))
                 ;
 
@@ -154,14 +226,14 @@ namespace JoltBuoyancy
                 ->Event("GetWaterSettings", &JoltWaterVolumeRequestBus::Events::GetWaterSettings)
                 ->Event("SetWavesEnabled", &JoltWaterVolumeRequestBus::Events::SetWavesEnabled)
                 ->Event("GetWavesEnabled", &JoltWaterVolumeRequestBus::Events::GetWavesEnabled)
-                ->Event("SetWaveAmplitude", &JoltWaterVolumeRequestBus::Events::SetWaveAmplitude)
-                ->Event("GetWaveAmplitude", &JoltWaterVolumeRequestBus::Events::GetWaveAmplitude)
-                ->Event("SetWaveLength", &JoltWaterVolumeRequestBus::Events::SetWaveLength)
-                ->Event("GetWaveLength", &JoltWaterVolumeRequestBus::Events::GetWaveLength)
-                ->Event("SetWaveSpeed", &JoltWaterVolumeRequestBus::Events::SetWaveSpeed)
-                ->Event("GetWaveSpeed", &JoltWaterVolumeRequestBus::Events::GetWaveSpeed)
-                ->Event("SetWaveDirection", &JoltWaterVolumeRequestBus::Events::SetWaveDirection)
-                ->Event("GetWaveDirection", &JoltWaterVolumeRequestBus::Events::GetWaveDirection)
+                ->Event("SetSpectrum", &JoltWaterVolumeRequestBus::Events::SetSpectrum)
+                ->Event("GetSpectrum", &JoltWaterVolumeRequestBus::Events::GetSpectrum)
+                ->Event("SetSeaState", &JoltWaterVolumeRequestBus::Events::SetSeaState)
+                ->Event("GetSeaState", &JoltWaterVolumeRequestBus::Events::GetSeaState)
+                ->Event("SetWindDirection", &JoltWaterVolumeRequestBus::Events::SetWindDirection)
+                ->Event("GetWindDirection", &JoltWaterVolumeRequestBus::Events::GetWindDirection)
+                ->Event("GetSignificantWaveHeight", &JoltWaterVolumeRequestBus::Events::GetSignificantWaveHeight)
+                ->Event("GetWaterVelocityAt", &JoltWaterVolumeRequestBus::Events::GetWaterVelocityAt)
                 ->Event("SetEnabled", &JoltWaterVolumeRequestBus::Events::SetEnabled)
                 ->Event("IsEnabled", &JoltWaterVolumeRequestBus::Events::IsEnabled)
                 ->Event("GetSubmergedBodyCount", &JoltWaterVolumeRequestBus::Events::GetSubmergedBodyCount)

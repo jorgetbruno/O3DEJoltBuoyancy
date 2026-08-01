@@ -175,10 +175,12 @@ namespace JoltBuoyancy
             local settings = JoltWaterVolumeSettings()
             settings.fluidDensity = 1025.0
             settings.wavesEnabled = true
-            settings.waveAmplitude = 0.4
-            settings.waveLength = 9.0
+            local spectrum = JoltWaterSpectrum()
+            spectrum.beaufort = 6.0
+            settings.spectrum = spectrum
             assert(math.abs(settings.fluidDensity - 1025.0) < 0.001)
             assert(settings.wavesEnabled == true)
+            assert(math.abs(settings.spectrum.beaufort - 6.0) < 0.001)
         )"));
     }
 } // namespace JoltBuoyancy

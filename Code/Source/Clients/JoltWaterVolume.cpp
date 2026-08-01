@@ -100,87 +100,151 @@ namespace JoltBuoyancy
 
     bool JoltWaterVolume::HasWaves(const JoltWaterVolumeSettings& settings)
     {
-        return settings.m_wavesEnabled && settings.m_waveAmplitude > 0.0f && settings.m_waveLength > 0.0f;
-    }
-
-    float JoltWaterVolume::LocalSurfaceHeight(
-        const JoltWaterVolumeSettings& settings, float elapsedTime, float localX, float localY, float halfHeight)
-    {
-        if (!HasWaves(settings))
-        {
-            return halfHeight;
-        }
-
-        const AZ::Vector2 direction = settings.m_waveDirection.GetLengthSq() > 0.0f
-            ? settings.m_waveDirection.GetNormalized()
-            : AZ::Vector2(1.0f, 0.0f);
-        const float waveNumber = AZ::Constants::TwoPi / settings.m_waveLength;
-        const float phase = waveNumber * settings.m_waveSpeed * elapsedTime;
-        return halfHeight +
-            settings.m_waveAmplitude * std::sin(waveNumber * (direction.GetX() * localX + direction.GetY() * localY) - phase);
+        return settings.m_wavesEnabled && settings.m_spectrum.m_beaufort > 0.0f &&
+            settings.m_spectrum.m_amplitudeScale > 0.0f;
     }
 
     JoltWaterSurfaceSample JoltWaterVolume::EvaluateBuiltInSurface(
         const JoltWaterVolumeSnapshot& snapshot,
         const JoltWaterVolumeSettings& settings,
-        float elapsedTime,
+        const JoltGerstnerWaves& waves,
         const AZ::Vector3& worldPoint)
     {
         const AZ::Transform& transform = snapshot.m_worldTransform;
         // A sphere is filled to its brim, so its surface is the top of the sphere.
-        const float halfHeight = snapshot.m_shape == JoltWaterVolumeShape::Sphere
+        const float meanHeight = snapshot.m_shape == JoltWaterVolumeShape::Sphere
             ? snapshot.m_dimensions.GetX() * 0.5f
             : snapshot.m_dimensions.GetZ() * 0.5f;
 
-        if (!HasWaves(settings))
+        if (!HasWaves(settings) || waves.IsEmpty())
         {
             JoltWaterSurfaceSample flat;
             flat.m_normal = transform.TransformVector(AZ::Vector3::CreateAxisZ()).GetNormalizedSafe();
-            flat.m_position = transform.TransformPoint(AZ::Vector3(0.0f, 0.0f, halfHeight));
+            flat.m_position = transform.TransformPoint(AZ::Vector3(0.0f, 0.0f, meanHeight));
             return flat;
         }
 
-        // Everything happens in the volume's own space, so the wave rides a tilted volume
+        // Everything happens in the volume's own space, so the sea rides a tilted volume
         // instead of ignoring the tilt and staying world-flat.
-        const AZ::Transform inverseTransform = transform.GetInverse();
-        const AZ::Vector3 localPoint = inverseTransform.TransformPoint(worldPoint);
-
-        const auto heightAt = [&](float x, float y)
-        {
-            return LocalSurfaceHeight(settings, elapsedTime, x, y, halfHeight);
-        };
-
-        // Three taps around the point give the local slope; the analytic derivative would
-        // do as well, but finite differences keep working if this is ever swapped for a
-        // sum of waves or a texture.
-        const float epsilon = 0.05f * settings.m_waveLength;
-        const float here = heightAt(localPoint.GetX(), localPoint.GetY());
-        const float alongX = heightAt(localPoint.GetX() + epsilon, localPoint.GetY());
-        const float alongY = heightAt(localPoint.GetX(), localPoint.GetY() + epsilon);
-
-        const AZ::Vector3 tangentX(epsilon, 0.0f, alongX - here);
-        const AZ::Vector3 tangentY(0.0f, epsilon, alongY - here);
-        const AZ::Vector3 localNormal = tangentX.Cross(tangentY).GetNormalizedSafe();
+        const AZ::Vector3 localPoint = transform.GetInverse().TransformPoint(worldPoint);
+        const JoltGerstnerSample wave =
+            waves.SampleAbove(AZ::Vector2(localPoint.GetX(), localPoint.GetY()), meanHeight);
 
         JoltWaterSurfaceSample sample;
-        sample.m_position = transform.TransformPoint(AZ::Vector3(localPoint.GetX(), localPoint.GetY(), here));
-        sample.m_normal = transform.TransformVector(localNormal).GetNormalizedSafe();
+        sample.m_position = transform.TransformPoint(wave.m_position);
+        sample.m_normal = transform.TransformVector(wave.m_normal).GetNormalizedSafe();
+        sample.m_velocity = transform.TransformVector(wave.m_velocity);
+        sample.m_jacobian = wave.m_jacobian;
         return sample;
+    }
+
+    JoltWaterSurfaceSample JoltWaterVolume::SampleAcrossFootprint(
+        const JoltWaterVolumeSnapshot& snapshot,
+        const JoltWaterVolumeSettings& settings,
+        const JoltGerstnerWaves& waves,
+        const SurfaceFunction& customSurface,
+        const AZ::Vector3& bodyPosition,
+        float footprintRadius,
+        AZ::u32 sampleCount)
+    {
+        const auto sampleAt = [&](const AZ::Vector3& point)
+        {
+            return customSurface ? customSurface(point) : EvaluateBuiltInSurface(snapshot, settings, waves, point);
+        };
+
+        // A flat surface returns the same plane wherever it is sampled, so spreading the
+        // samples would cost four evaluations to learn nothing.
+        const bool flat = !customSurface && (!HasWaves(settings) || waves.IsEmpty());
+        if (flat || sampleCount <= 1 || footprintRadius <= 0.01f)
+        {
+            return sampleAt(bodyPosition);
+        }
+
+        // Spread around the body's footprint in the volume's own horizontal plane, so the
+        // samples straddle a crest the way the hull does.
+        const AZ::Transform& transform = snapshot.m_worldTransform;
+        const AZ::Vector3 acrossX = transform.TransformVector(AZ::Vector3::CreateAxisX()).GetNormalizedSafe();
+        const AZ::Vector3 acrossY = transform.TransformVector(AZ::Vector3::CreateAxisY()).GetNormalizedSafe();
+
+        const AZ::u32 clampedCount = AZ::GetClamp(sampleCount, 2u, 16u);
+        AZ::Vector3 averagePosition = AZ::Vector3::CreateZero();
+        AZ::Vector3 averageNormal = AZ::Vector3::CreateZero();
+        AZ::Vector3 averageVelocity = AZ::Vector3::CreateZero();
+        float averageJacobian = 0.0f;
+
+        for (AZ::u32 index = 0; index < clampedCount; ++index)
+        {
+            const float angle = AZ::Constants::TwoPi * static_cast<float>(index) / static_cast<float>(clampedCount);
+            const AZ::Vector3 offset =
+                acrossX * (footprintRadius * std::cos(angle)) + acrossY * (footprintRadius * std::sin(angle));
+            const JoltWaterSurfaceSample sample = sampleAt(bodyPosition + offset);
+
+            // Only the height of each sample matters for the plane; keeping the offset
+            // would just re-describe the ring the samples were taken on.
+            averagePosition += sample.m_position - offset;
+            averageNormal += sample.m_normal;
+            averageVelocity += sample.m_velocity;
+            averageJacobian += sample.m_jacobian;
+        }
+
+        const float inverseCount = 1.0f / static_cast<float>(clampedCount);
+        JoltWaterSurfaceSample fitted;
+        fitted.m_position = averagePosition * inverseCount;
+        fitted.m_normal = averageNormal.GetNormalizedSafe();
+        fitted.m_velocity = averageVelocity * inverseCount;
+        fitted.m_jacobian = averageJacobian * inverseCount;
+        return fitted;
     }
 
     JoltWaterSurfaceSample JoltWaterVolume::EvaluateSurface(const AZ::Vector3& worldPoint) const
     {
+        // One pass over the locks rather than three. This used to take the surface-function
+        // mutex, then the settings mutex twice more inside GetSnapshot and GetSettings,
+        // which OnStep avoids by hoisting them out of its body loop but every gameplay
+        // caller paid - and multi-sampling makes this path much hotter.
+        SurfaceFunction customSurface;
         {
             AZStd::lock_guard lock(m_surfaceFunctionMutex);
-            if (m_surfaceFunction)
-            {
-                return m_surfaceFunction(worldPoint);
-            }
+            customSurface = m_surfaceFunction;
+        }
+        if (customSurface)
+        {
+            return customSurface(worldPoint);
         }
 
-        const JoltWaterVolumeSnapshot snapshot = GetSnapshot();
-        return EvaluateBuiltInSurface(
-            snapshot, GetSettings(), m_elapsedTime.load(AZStd::memory_order_relaxed), worldPoint);
+        JoltWaterVolumeSnapshot snapshot;
+        JoltWaterVolumeSettings settings;
+        JoltGerstnerWaves waves;
+        {
+            AZStd::lock_guard lock(m_settingsMutex);
+            snapshot.m_worldTransform = m_worldTransform;
+            snapshot.m_dimensions = m_dimensions;
+            snapshot.m_worldBounds = m_worldBounds;
+            snapshot.m_shape = m_settings.m_shape;
+            settings = m_settings;
+            waves = m_waves;
+        }
+        snapshot.m_enabled = IsEnabled();
+        snapshot.m_owner = this;
+
+        return EvaluateBuiltInSurface(snapshot, settings, waves, worldPoint);
+    }
+
+    JoltGerstnerWaves JoltWaterVolume::GetWaves() const
+    {
+        AZStd::lock_guard lock(m_settingsMutex);
+        return m_waves;
+    }
+
+    float JoltWaterVolume::GetSignificantWaveHeight() const
+    {
+        AZStd::lock_guard lock(m_settingsMutex);
+        return m_waves.GetSignificantWaveHeight();
+    }
+
+    AZ::Vector3 JoltWaterVolume::GetWaterVelocityAt(const AZ::Vector3& worldPoint) const
+    {
+        return GetSettings().m_fluidVelocity + EvaluateSurface(worldPoint).m_velocity;
     }
 
     void JoltWaterVolume::SetSurfaceFunction(SurfaceFunction surfaceFunction)
@@ -337,9 +401,16 @@ namespace JoltBuoyancy
         // body riding a crest leaves the query box, stops being affected, falls back in,
         // and oscillates.
         AZ::Vector3 padded = m_dimensions;
-        if (HasWaves(m_settings))
+        if (HasWaves(m_settings) && !m_waves.IsEmpty())
         {
-            padded.SetZ(padded.GetZ() + 2.0f * m_settings.m_waveAmplitude);
+            // Every component contributes, vertically and horizontally. A Gerstner wave
+            // drags points sideways toward the crest as well as lifting them, and the
+            // horizontal part was not accounted for at all when this was a single sine.
+            const float verticalReach = m_waves.GetMaximumHeight();
+            const float horizontalReach = m_waves.GetMaximumHorizontalDisplacement();
+            padded.SetZ(padded.GetZ() + 2.0f * verticalReach);
+            padded.SetX(padded.GetX() + 2.0f * horizontalReach);
+            padded.SetY(padded.GetY() + 2.0f * horizontalReach);
         }
 
         // A sphere is sized by its X extent alone, so its bounds are a cube of that size.
@@ -388,9 +459,26 @@ namespace JoltBuoyancy
         }
 
         AZStd::lock_guard lock(m_settingsMutex);
+        const bool spectrumChanged = m_waves.IsEmpty() ||
+            !AZ::IsClose(settings.m_spectrum.m_beaufort, m_settings.m_spectrum.m_beaufort) ||
+            !AZ::IsClose(settings.m_spectrum.m_fetch, m_settings.m_spectrum.m_fetch) ||
+            !settings.m_spectrum.m_windDirection.IsClose(m_settings.m_spectrum.m_windDirection) ||
+            !AZ::IsClose(settings.m_spectrum.m_directionalSpread, m_settings.m_spectrum.m_directionalSpread) ||
+            settings.m_spectrum.m_componentCount != m_settings.m_spectrum.m_componentCount ||
+            !AZ::IsClose(settings.m_spectrum.m_amplitudeScale, m_settings.m_spectrum.m_amplitudeScale) ||
+            !AZ::IsClose(settings.m_spectrum.m_steepness, m_settings.m_spectrum.m_steepness) ||
+            settings.m_spectrum.m_seed != m_settings.m_spectrum.m_seed;
+
         m_settings = settings;
 
-        // Wave amplitude and shape both change the bounds the broadphase is queried with.
+        // Resynthesising throws away the accumulated phases, so it only happens when the
+        // spectrum actually changed. Scaling speed alone leaves the waves where they are.
+        if (spectrumChanged)
+        {
+            m_waves.Synthesise(m_settings.m_spectrum);
+        }
+
+        // Wave reach and shape both change the bounds the broadphase is queried with.
         RebuildBoundsUnlocked();
     }
 
@@ -444,33 +532,25 @@ namespace JoltBuoyancy
         AZ::Transform worldTransform;
         AZ::Vector3 dimensions;
         AZ::Aabb worldBounds;
+        JoltGerstnerWaves waves;
         {
             AZStd::lock_guard lock(m_settingsMutex);
             settings = m_settings;
             worldTransform = m_worldTransform;
             dimensions = m_dimensions;
             worldBounds = m_worldBounds;
+
+            // Each component carries its own phase, advanced by its own frequency and
+            // wrapped separately. A shared clock has nothing to wrap to once the periods
+            // stop being multiples of each other.
+            m_waves.Advance(inContext.mDeltaTime, settings.m_spectrum.m_speedScale);
+            waves = m_waves;
         }
 
         if (!worldBounds.IsValid())
         {
             return;
         }
-
-        // The wave phase advances with the simulation rather than with a wall clock, so a
-        // paused game has a still surface. Wrapped to one wave period: left to run, a
-        // float32 accumulating 1/60 s a step loses its fractional precision after a few
-        // hours and the waves visibly judder.
-        float elapsedTime = m_elapsedTime.load(AZStd::memory_order_relaxed) + inContext.mDeltaTime;
-        if (HasWaves(settings) && settings.m_waveSpeed != 0.0f)
-        {
-            const float period = settings.m_waveLength / AZStd::abs(settings.m_waveSpeed);
-            if (period > 0.0f)
-            {
-                elapsedTime = std::fmod(elapsedTime, period);
-            }
-        }
-        m_elapsedTime.store(elapsedTime, AZStd::memory_order_relaxed);
 
         const JPH::AABox queryBox(ToJolt(worldBounds.GetMin()), ToJolt(worldBounds.GetMax()));
         JPH::AllHitCollisionCollector<JPH::CollideShapeBodyCollector> collector;
@@ -676,16 +756,17 @@ namespace JoltBuoyancy
             // Sampled per body rather than once for the volume, which is what lets the
             // surface be a wave instead of a plane: two boats on the same swell sit at
             // different heights and tilt with their own bit of it.
+            //
+            // And sampled at several points across the body rather than one at its centre,
+            // so a hull long enough to straddle a crest pitches on it instead of merely
+            // riding up and down. The footprint comes from the body's own bounds.
             const AZ::Vector3 bodyPosition = FromJolt(JPH::Vec3(body->GetCenterOfMassPosition()));
-            JoltWaterSurfaceSample surface;
-            if (customSurface)
-            {
-                surface = customSurface(bodyPosition);
-            }
-            else
-            {
-                surface = EvaluateBuiltInSurface(self, settings, elapsedTime, bodyPosition);
-            }
+            const JPH::AABox bodyBounds = body->GetWorldSpaceBounds();
+            const float footprintRadius =
+                0.5f * AZ::GetMax(bodyBounds.GetSize().GetX(), bodyBounds.GetSize().GetY());
+            const JoltWaterSurfaceSample surface = SampleAcrossFootprint(
+                self, settings, waves, customSurface, bodyPosition, footprintRadius,
+                settings.m_surfaceSamplesPerBody);
 
             // Read before the impulse: ApplyBuoyancyImpulse damps the velocity, so sampling
             // afterwards reports a splash slower than the one that actually happened.
@@ -696,9 +777,14 @@ namespace JoltBuoyancy
             const float linearDrag = settings.m_linearDrag * AZStd::max(bodyOverride.m_linearDragMultiplier, 0.0f);
             const float angularDrag = settings.m_angularDrag * AZStd::max(bodyOverride.m_angularDragMultiplier, 0.0f);
 
+            // The volume's own current plus the water's orbital motion at this body.
+            // Passing only the current makes the sea a conveyor belt; the orbital part is
+            // what makes a boat surge down the face of a swell and flotsam gather in lines.
+            const AZ::Vector3 waterVelocity = settings.m_fluidVelocity + surface.m_velocity;
+
             if (body->ApplyBuoyancyImpulse(
                     ToJoltR(surface.m_position), ToJolt(surface.m_normal), buoyancy, linearDrag, angularDrag,
-                    ToJolt(settings.m_fluidVelocity), gravity, inContext.mDeltaTime))
+                    ToJolt(waterVelocity), gravity, inContext.mDeltaTime))
             {
                 ++submergedCount;
 

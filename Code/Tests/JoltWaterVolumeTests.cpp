@@ -523,32 +523,75 @@ namespace JoltBuoyancy
         JoltWaterVolumeSettings settings;
         settings.m_fluidDensity = 1000.0f;
         settings.m_wavesEnabled = true;
-        settings.m_waveAmplitude = 1.0f;
-        settings.m_waveLength = 8.0f;
-        settings.m_waveSpeed = 4.0f;
+        settings.m_spectrum.m_beaufort = 7.0f;
+        settings.m_spectrum.m_componentCount = 4;
         m_waterVolume.SetSettings(settings);
         m_waterVolume.SetVolume(
-            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), AZ::Vector3(50.0f, 50.0f, 5.0f));
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), AZ::Vector3(200.0f, 200.0f, 5.0f));
         ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
 
-        // A crest and a trough: a quarter and three quarters along the wave. Sampling half
-        // a wavelength apart would compare two zero crossings and see no difference at all.
-        const float atCrest = m_waterVolume.EvaluateSurface(AZ::Vector3(2.0f, 0.0f, 0.0f)).m_position.GetZ();
-        const float atTrough = m_waterVolume.EvaluateSurface(AZ::Vector3(6.0f, 0.0f, 0.0f)).m_position.GetZ();
-        EXPECT_GT(atCrest - atTrough, 1.5f) << "amplitude 1 means about 2 m between crest and trough";
+        // With a spectrum there is no single wavelength to pick a crest and a trough from,
+        // so the surface is swept instead. The detailed wave maths lives in
+        // JoltGerstnerWaveTests; this checks the volume actually wires it up.
+        float lowest = 1000.0f;
+        float highest = -1000.0f;
+        for (int x = -80; x <= 80; ++x)
+        {
+            const float height =
+                m_waterVolume.EvaluateSurface(AZ::Vector3(static_cast<float>(x), 0.0f, 0.0f)).m_position.GetZ();
+            lowest = AZStd::min(lowest, height);
+            highest = AZStd::max(highest, height);
+        }
+        EXPECT_GT(highest - lowest, 0.3f) << "the volume's surface should not be flat with waves on";
 
-        // The normal tilts off vertical where the surface slopes, which is what makes a
-        // floating body rock rather than just bob. Sampled at a zero crossing, where the
-        // slope is steepest - at the crest the surface is flat and the normal is straight up.
-        const AZ::Vector3 slopedNormal = m_waterVolume.EvaluateSurface(AZ::Vector3::CreateZero()).m_normal;
-        EXPECT_LT(slopedNormal.GetZ(), 0.999f);
-        EXPECT_NEAR(slopedNormal.GetLength(), 1.0f, 0.01f);
+        // The normal tilts off vertical somewhere on a wavy surface, which is what makes a
+        // floating body rock rather than just bob.
+        bool foundSlope = false;
+        for (int x = -80; x <= 80 && !foundSlope; ++x)
+        {
+            const AZ::Vector3 normal =
+                m_waterVolume.EvaluateSurface(AZ::Vector3(static_cast<float>(x), 0.0f, 0.0f)).m_normal;
+            EXPECT_NEAR(normal.GetLength(), 1.0f, 0.01f);
+            foundSlope = normal.GetZ() < 0.999f;
+        }
+        EXPECT_TRUE(foundSlope);
 
-        // And the wave travels: the same point is at a different height a moment later.
-        const float atOrigin = m_waterVolume.EvaluateSurface(AZ::Vector3::CreateZero()).m_position.GetZ();
+        // And the sea moves: the same point is at a different height a moment later.
+        const AZ::Vector3 probe(3.0f, 0.0f, 0.0f);
+        const float before = m_waterVolume.EvaluateSurface(probe).m_position.GetZ();
         Simulate(0.5f);
-        const float atOriginLater = m_waterVolume.EvaluateSurface(AZ::Vector3::CreateZero()).m_position.GetZ();
-        EXPECT_GT(AZStd::abs(atOriginLater - atOrigin), 0.1f);
+        EXPECT_GT(AZStd::abs(m_waterVolume.EvaluateSurface(probe).m_position.GetZ() - before), 0.02f);
+    }
+
+    TEST_F(JoltWaterVolumeTests, TheWaterHasOrbitalVelocity)
+    {
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        settings.m_wavesEnabled = true;
+        settings.m_spectrum.m_beaufort = 7.0f;
+        settings.m_spectrum.m_componentCount = 4;
+        m_waterVolume.SetSettings(settings);
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), AZ::Vector3(200.0f, 200.0f, 5.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        // Passing only the volume's current makes the sea a conveyor belt. Real water
+        // orbits, and that is what a boat surges down a swell on.
+        float mostPositive = -1000.0f;
+        float mostNegative = 1000.0f;
+        for (int x = -80; x <= 80; ++x)
+        {
+            const AZ::Vector3 velocity = m_waterVolume.GetWaterVelocityAt(AZ::Vector3(static_cast<float>(x), 0.0f, 0.0f));
+            mostPositive = AZStd::max(mostPositive, velocity.GetZ());
+            mostNegative = AZStd::min(mostNegative, velocity.GetZ());
+        }
+        EXPECT_GT(mostPositive, 0.05f);
+        EXPECT_LT(mostNegative, -0.05f);
+
+        // The volume's own current is still in there on top of the orbital part.
+        settings.m_fluidVelocity = AZ::Vector3(100.0f, 0.0f, 0.0f);
+        m_waterVolume.SetSettings(settings);
+        EXPECT_GT(m_waterVolume.GetWaterVelocityAt(AZ::Vector3::CreateZero()).GetX(), 50.0f);
     }
 
     TEST_F(JoltWaterVolumeTests, ACustomSurfaceFunctionReplacesTheBuiltInOne)
@@ -824,29 +867,38 @@ namespace JoltBuoyancy
 
     TEST_F(JoltWaterVolumeTests, WaveCrestsStayInsideTheQueryBounds)
     {
-        // The wave lifts the surface above the volume's own lid, but the broadphase query
-        // decides which bodies are looked at. Unpadded, a body riding a crest leaves the
-        // query, stops being affected, falls back in and oscillates.
+        // The waves lift the surface above the volume's own lid and drag it sideways, but
+        // the broadphase query decides which bodies are looked at. Unpadded, a body riding
+        // a crest leaves the query, stops being affected, falls back in and oscillates.
         JoltWaterVolumeSettings settings;
         settings.m_fluidDensity = 1000.0f;
         settings.m_wavesEnabled = true;
-        settings.m_waveAmplitude = 1.5f;
-        settings.m_waveLength = 8.0f;
-        settings.m_waveSpeed = 0.0f; // frozen, so the crest stays where it is
+        settings.m_spectrum.m_beaufort = 8.0f;
+        settings.m_spectrum.m_componentCount = 4;
         m_waterVolume.SetSettings(settings);
-        m_waterVolume.SetVolume(
-            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), AZ::Vector3(50.0f, 50.0f, 5.0f));
+
+        const AZ::Vector3 dimensions(100.0f, 100.0f, 5.0f);
+        m_waterVolume.SetVolume(AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), dimensions);
         ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
 
-        // The unpadded lid is z = 0; with amplitude 1.5 the bounds must reach past it.
+        const JoltGerstnerWaves waves = m_waterVolume.GetWaves();
+        ASSERT_FALSE(waves.IsEmpty());
         const JoltWaterVolumeSnapshot snapshot = m_waterVolume.GetSnapshot();
-        EXPECT_GT(snapshot.m_worldBounds.GetMax().GetZ(), 1.0f);
 
-        // And a body actually rides the crest rather than falling out of the query at the
-        // old lid height.
-        auto cube = CreateCubeAt(200.0f, AZ::Vector3(2.0f, 0.0f, -3.0f)); // x = 2 is a crest
-        Simulate(6.0f);
-        EXPECT_GT(GetBodyPosition(cube).GetZ(), 0.2f) << "it should settle on the crest, above the flat lid";
+        // Every component contributes, and the horizontal drag counts too - a single
+        // component's amplitude is not enough padding.
+        EXPECT_GE(snapshot.m_worldBounds.GetMax().GetZ(), waves.GetMaximumHeight() * 0.99f);
+        EXPECT_GE(
+            snapshot.m_worldBounds.GetMax().GetX(),
+            dimensions.GetX() * 0.5f + waves.GetMaximumHorizontalDisplacement() * 0.99f);
+
+        // No point on the surface may escape the padded bounds.
+        for (int x = -50; x <= 50; x += 2)
+        {
+            const AZ::Vector3 surface =
+                m_waterVolume.EvaluateSurface(AZ::Vector3(static_cast<float>(x), 0.0f, 0.0f)).m_position;
+            EXPECT_LE(surface.GetZ(), snapshot.m_worldBounds.GetMax().GetZ() + 0.01f);
+        }
     }
 
     TEST_F(JoltWaterVolumeTests, DragMultiplierChangesHowFastABodyIsSlowed)

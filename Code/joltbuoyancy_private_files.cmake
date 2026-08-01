@@ -6,6 +6,8 @@ set(FILES
     Source/Clients/JoltBuoyancyOverrideRegistry.cpp
     Source/Clients/JoltBuoyancyOverrideRegistry.h
     Source/Clients/JoltBuoyancyReflection.cpp
+    Source/Clients/JoltGerstnerWaves.cpp
+    Source/Clients/JoltGerstnerWaves.h
     Source/Clients/JoltWaterVolume.cpp
     Source/Clients/JoltWaterVolume.h
     Source/Clients/JoltWaterVolumeComponent.cpp

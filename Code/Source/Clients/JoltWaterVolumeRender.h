@@ -3,6 +3,8 @@
 #include <AzCore/Math/Transform.h>
 #include <AzCore/Math/Vector3.h>
 
+#include <JoltBuoyancy/JoltBuoyancyBus.h>
+
 namespace AzFramework
 {
     class DebugDisplayRequests;
@@ -10,6 +12,8 @@ namespace AzFramework
 
 namespace JoltBuoyancy
 {
+    class JoltWaterVolume;
+
     //! Draws a water volume as a translucent box with its surface face picked out.
     //!
     //! Shared by the editor component (viewport) and the runtime component (game mode)
@@ -22,5 +26,5 @@ namespace JoltBuoyancy
         const AZ::Transform& worldTransform,
         const AZ::Vector3& dimensions,
         const JoltWaterVolumeSettings* settings = nullptr,
-        float elapsedTime = 0.0f);
+        const JoltWaterVolume* volume = nullptr);
 } // namespace JoltBuoyancy

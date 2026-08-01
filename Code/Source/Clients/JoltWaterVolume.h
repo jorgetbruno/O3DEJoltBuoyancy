@@ -21,6 +21,7 @@
 #include <Jolt/Physics/Body/BodyID.h>
 #include <Jolt/Physics/PhysicsStepListener.h>
 
+#include <Clients/JoltGerstnerWaves.h>
 #include <JoltBuoyancy/JoltBuoyancyBus.h>
 
 namespace JPH
@@ -30,11 +31,19 @@ namespace JPH
 
 namespace JoltBuoyancy
 {
-    //! Where the water's surface is at one point, and which way it faces.
+    //! Where the water's surface is at one point, which way it faces, and how the water
+    //! there is moving.
     struct JoltWaterSurfaceSample
     {
         AZ::Vector3 m_position = AZ::Vector3::CreateZero();
         AZ::Vector3 m_normal = AZ::Vector3::CreateAxisZ();
+        //! Orbital velocity of the water at this point, in world space, excluding the
+        //! volume's own current. Added to the current before it reaches the solver, which
+        //! is what makes a boat surge down the face of a swell.
+        AZ::Vector3 m_velocity = AZ::Vector3::CreateZero();
+        //! Below 1 where the surface is compressing toward a crest, at or below 0 where it
+        //! has folded - which is where a real sea breaks. Drives foam.
+        float m_jacobian = 1.0f;
     };
 
     //! A body crossing into or out of the water, queued during the step and delivered
@@ -161,21 +170,19 @@ namespace JoltBuoyancy
         //! How far below the surface a point sits, along the surface normal.
         float GetDepthAt(const AZ::Vector3& worldPoint) const;
 
-        //! The wave phase the volume has reached, in seconds of simulated time. Wrapped to
-        //! one wave period, so it stays precise however long the level runs.
-        float GetElapsedTime() const
-        {
-            return m_elapsedTime.load(AZStd::memory_order_relaxed);
-        }
-
         //! Whether the wave settings actually produce a moving surface. The renderer uses
         //! this to decide between a flat lid and a tessellated one.
         static bool HasWaves(const JoltWaterVolumeSettings& settings);
 
-        //! Height of the surface above a point in the volume's own space, which is what the
-        //! renderer tessellates to draw a rippled surface instead of a flat lid.
-        static float LocalSurfaceHeight(
-            const JoltWaterVolumeSettings& settings, float elapsedTime, float localX, float localY, float halfHeight);
+        //! A copy of the current wave set, for the renderer to tessellate and for tests.
+        //! Taken under the mutex, so a caller can hold it without racing the simulation.
+        JoltGerstnerWaves GetWaves() const;
+
+        //! Significant wave height of the current sea state, in metres.
+        float GetSignificantWaveHeight() const;
+
+        //! Velocity of the water at a world point, including orbital motion.
+        AZ::Vector3 GetWaterVelocityAt(const AZ::Vector3& worldPoint) const;
 
         //! Hands over the enter and exit events the last step produced, leaving the queue
         //! empty. Called after the step, for the same reason as WakePendingBodies: a
@@ -187,13 +194,28 @@ namespace JoltBuoyancy
         void OnStep(const JPH::PhysicsStepListenerContext& inContext) override;
 
     private:
-        //! The built-in surface: the local +Z face, rippled by the wave settings when they
-        //! are on. Takes a pre-copied snapshot so it can run without touching the mutex.
+        //! The built-in surface: the local +Z face, rippled by the waves when they are on.
+        //! Takes pre-copied state so it can run without touching the mutex.
         static JoltWaterSurfaceSample EvaluateBuiltInSurface(
             const JoltWaterVolumeSnapshot& snapshot,
             const JoltWaterVolumeSettings& settings,
-            float elapsedTime,
+            const JoltGerstnerWaves& waves,
             const AZ::Vector3& worldPoint);
+
+        //! Fits a plane through several surface samples spread across a body's footprint.
+        //!
+        //! One sample at the centre of mass gives the solver a plane the whole hull shares,
+        //! so a boat long enough to straddle a crest rises and falls without pitching.
+        //! Averaging positions and normals across the footprint lets the hull sit on the
+        //! slope it is actually on.
+        static JoltWaterSurfaceSample SampleAcrossFootprint(
+            const JoltWaterVolumeSnapshot& snapshot,
+            const JoltWaterVolumeSettings& settings,
+            const JoltGerstnerWaves& waves,
+            const SurfaceFunction& customSurface,
+            const AZ::Vector3& bodyPosition,
+            float footprintRadius,
+            AZ::u32 sampleCount);
 
         //! Bumped whenever the water itself changes, so OnStep can tell "the body settled
         //! in water that has not moved since" from "the water just changed under it".
@@ -236,9 +258,11 @@ namespace JoltBuoyancy
         AZStd::mutex m_pendingWakeMutex;
         AZStd::vector<JPH::BodyID> m_pendingWake;
 
-        //! Wave phase. Advanced by OnStep rather than read from a clock, so the water only
-        //! moves when the simulation does and a paused game has a still surface.
-        AZStd::atomic<float> m_elapsedTime{ 0.0f };
+        //! The synthesised waves, and their phases. Advanced by OnStep rather than read
+        //! from a clock, so the water only moves when the simulation does and a paused game
+        //! has a still surface. Guarded by m_settingsMutex, which OnStep already takes once
+        //! per step to copy the settings out.
+        JoltGerstnerWaves m_waves;
 
         //! Set by SetSurfaceFunction. Guarded because gameplay can swap it while a step is
         //! reading it.

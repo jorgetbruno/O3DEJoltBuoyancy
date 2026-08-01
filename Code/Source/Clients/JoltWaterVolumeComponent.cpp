@@ -152,7 +152,7 @@ namespace JoltBuoyancy
         AzFramework::DebugDisplayRequestBus::Bind(debugDisplayBus, AzFramework::g_defaultSceneEntityDebugDisplayId);
         if (auto* debugDisplay = AzFramework::DebugDisplayRequestBus::FindFirstHandler(debugDisplayBus))
         {
-            DrawWaterVolume(*debugDisplay, m_worldTransform, m_dimensions, &m_settings, m_waterVolume.GetElapsedTime());
+            DrawWaterVolume(*debugDisplay, m_worldTransform, m_dimensions, &m_settings, &m_waterVolume);
         }
     }
 
@@ -233,48 +233,47 @@ namespace JoltBuoyancy
         return m_settings.m_wavesEnabled;
     }
 
-    void JoltWaterVolumeComponent::SetWaveAmplitude(float amplitude)
+    void JoltWaterVolumeComponent::SetSpectrum(const JoltWaterSpectrum& spectrum)
     {
-        m_settings.m_waveAmplitude = amplitude;
+        m_settings.m_spectrum = spectrum;
         m_waterVolume.SetSettings(m_settings);
     }
 
-    float JoltWaterVolumeComponent::GetWaveAmplitude() const
+    JoltWaterSpectrum JoltWaterVolumeComponent::GetSpectrum() const
     {
-        return m_settings.m_waveAmplitude;
+        return m_settings.m_spectrum;
     }
 
-    void JoltWaterVolumeComponent::SetWaveLength(float length)
+    void JoltWaterVolumeComponent::SetSeaState(float beaufort)
     {
-        m_settings.m_waveLength = length;
+        m_settings.m_spectrum.m_beaufort = beaufort;
         m_waterVolume.SetSettings(m_settings);
     }
 
-    float JoltWaterVolumeComponent::GetWaveLength() const
+    float JoltWaterVolumeComponent::GetSeaState() const
     {
-        return m_settings.m_waveLength;
+        return m_settings.m_spectrum.m_beaufort;
     }
 
-    void JoltWaterVolumeComponent::SetWaveSpeed(float speed)
+    void JoltWaterVolumeComponent::SetWindDirection(const AZ::Vector2& direction)
     {
-        m_settings.m_waveSpeed = speed;
+        m_settings.m_spectrum.m_windDirection = direction;
         m_waterVolume.SetSettings(m_settings);
     }
 
-    float JoltWaterVolumeComponent::GetWaveSpeed() const
+    AZ::Vector2 JoltWaterVolumeComponent::GetWindDirection() const
     {
-        return m_settings.m_waveSpeed;
+        return m_settings.m_spectrum.m_windDirection;
     }
 
-    void JoltWaterVolumeComponent::SetWaveDirection(const AZ::Vector2& direction)
+    float JoltWaterVolumeComponent::GetSignificantWaveHeight() const
     {
-        m_settings.m_waveDirection = direction;
-        m_waterVolume.SetSettings(m_settings);
+        return m_waterVolume.GetSignificantWaveHeight();
     }
 
-    AZ::Vector2 JoltWaterVolumeComponent::GetWaveDirection() const
+    AZ::Vector3 JoltWaterVolumeComponent::GetWaterVelocityAt(const AZ::Vector3& worldPoint) const
     {
-        return m_settings.m_waveDirection;
+        return m_waterVolume.GetWaterVelocityAt(worldPoint);
     }
 
     float JoltWaterVolumeComponent::GetSubmergedFraction(AZ::EntityId bodyEntityId) const
