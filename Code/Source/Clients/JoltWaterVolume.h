@@ -71,6 +71,11 @@ namespace JoltBuoyancy
 
         JoltWaterVolumeShape m_shape = JoltWaterVolumeShape::Box;
 
+        //! How far below the surface a plane reaches. Carried on the snapshot because
+        //! Contains has to answer with the same floor RebuildBoundsUnlocked gave the
+        //! broadphase query, or the volume claims water it can never reach a body in.
+        float m_maxDepth = 10000.0f;
+
         //! Enough of the peer's settings to blend with. Ownership is all-or-nothing, so
         //! without this a body crossing from a river into a pool changes current and
         //! density in a single step.

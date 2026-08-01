@@ -122,6 +122,15 @@ namespace JoltBuoyancy
         }
     }
 
+    AZ::u32 JoltWaterVolumeSettings::GetPlaneDepthVisibility() const
+    {
+        // A box and a sphere have a floor of their own, so showing the field for them
+        // would be a control that silently does nothing.
+        return m_shape == JoltWaterVolumeShape::Plane
+            ? AZ::Edit::PropertyVisibility::Show
+            : AZ::Edit::PropertyVisibility::Hide;
+    }
+
     void JoltWaterVolumeSettings::Reflect(AZ::ReflectContext* context)
     {
         JoltWaterSpectrum::Reflect(context);
@@ -129,7 +138,7 @@ namespace JoltBuoyancy
         if (auto* serializeContext = azrtti_cast<AZ::SerializeContext*>(context))
         {
             serializeContext->Class<JoltWaterVolumeSettings>()
-                ->Version(2)
+                ->Version(3)
                 ->Field("FluidDensity", &JoltWaterVolumeSettings::m_fluidDensity)
                 ->Field("LinearDrag", &JoltWaterVolumeSettings::m_linearDrag)
                 ->Field("AngularDrag", &JoltWaterVolumeSettings::m_angularDrag)
@@ -140,6 +149,7 @@ namespace JoltBuoyancy
                 ->Field("CollisionGroupId", &JoltWaterVolumeSettings::m_collisionGroupId)
                 ->Field("ReportSubmergedFraction", &JoltWaterVolumeSettings::m_reportSubmergedFraction)
                 ->Field("Shape", &JoltWaterVolumeSettings::m_shape)
+                ->Field("MaxDepth", &JoltWaterVolumeSettings::m_maxDepth)
                 ->Field("OwnershipHysteresis", &JoltWaterVolumeSettings::m_ownershipHysteresis)
                 ;
 
@@ -150,10 +160,23 @@ namespace JoltBuoyancy
                         ->Attribute(AZ::Edit::Attributes::AutoExpand, true)
                     ->DataElement(AZ::Edit::UIHandlers::ComboBox, &JoltWaterVolumeSettings::m_shape,
                         "Shape", "The region the water fills. A sphere is sized by its X dimension and its surface "
-                        "sits at the top of the sphere.")
+                        "sits at the top of the sphere. A plane is everything below the surface within the "
+                        "horizontal extent, with no floor at the Z dimension.")
                         ->EnumAttribute(JoltWaterVolumeShape::Box, "Box")
                         ->EnumAttribute(JoltWaterVolumeShape::Sphere, "Sphere")
                         ->EnumAttribute(JoltWaterVolumeShape::Plane, "Plane (open water)")
+                        // Maximum depth appears and disappears with this, so the whole tree
+                        // has to be refreshed rather than just the one widget's value.
+                        ->Attribute(AZ::Edit::Attributes::ChangeNotify, AZ::Edit::PropertyRefreshLevels::EntireTree)
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_maxDepth,
+                        "Maximum depth", "How far below the surface a plane reaches. It has no floor at the Z "
+                        "dimension, but the broadphase is still queried with a finite box and this is where its "
+                        "bottom goes - a body below it is not affected at all. The default is deeper than any "
+                        "playable world; lower it if the extent is large and many bodies sit below sea level that "
+                        "never need to float, since every body inside the box is examined each step.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
+                        ->Attribute(AZ::Edit::Attributes::Suffix, " m")
+                        ->Attribute(AZ::Edit::Attributes::Visibility, &JoltWaterVolumeSettings::GetPlaneDepthVisibility)
                     ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_fluidDensity,
                         "Fluid density", "Density of the fluid. A body floats when it is less dense than this and "
                         "sinks when it is denser. Fresh water is 1000.")
@@ -212,6 +235,7 @@ namespace JoltBuoyancy
                 ->Property("spectrum", BehaviorValueProperty(&JoltWaterVolumeSettings::m_spectrum))
                 ->Property("surfaceSamplesPerBody", BehaviorValueProperty(&JoltWaterVolumeSettings::m_surfaceSamplesPerBody))
                 ->Property("reportSubmergedFraction", BehaviorValueProperty(&JoltWaterVolumeSettings::m_reportSubmergedFraction))
+                ->Property("maxDepth", BehaviorValueProperty(&JoltWaterVolumeSettings::m_maxDepth))
                 ;
 
             // Exposed as plain constants: script has no enum type of its own, and these are

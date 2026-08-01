@@ -89,11 +89,18 @@ namespace JoltBuoyancy
         const AZ::Vector3 halfExtents = m_dimensions * 0.5f;
         if (m_shape == JoltWaterVolumeShape::Plane)
         {
-            // No floor: anything below the surface inside the horizontal extent is in the
-            // water. A body sinking past the bottom of a box stops being wet, which is
-            // wrong for open sea.
+            // No floor at the authored Z dimension: anything below the surface inside the
+            // horizontal extent is in the water, however deep. A body sinking past the
+            // bottom of a box stops being wet, which is wrong for open sea.
+            //
+            // Bounded by MaxDepth all the same, and deliberately by the same number
+            // RebuildBoundsUnlocked gives the broadphase. The two used to disagree - this
+            // said bottomless while the query box stopped at the authored dimension - so a
+            // body sinking past it was reported as underwater and silently got nothing.
+            const float floorHeight = halfExtents.GetZ() - AZ::GetMax(m_maxDepth, 0.0f);
             return AZStd::abs(localPoint.GetX()) <= halfExtents.GetX() &&
-                AZStd::abs(localPoint.GetY()) <= halfExtents.GetY() && localPoint.GetZ() <= halfExtents.GetZ();
+                AZStd::abs(localPoint.GetY()) <= halfExtents.GetY() && localPoint.GetZ() <= halfExtents.GetZ() &&
+                localPoint.GetZ() >= floorHeight;
         }
         return localPoint.GetAbs().IsLessEqualThan(halfExtents);
     }
@@ -250,6 +257,7 @@ namespace JoltBuoyancy
             snapshot.m_dimensions = m_dimensions;
             snapshot.m_worldBounds = m_worldBounds;
             snapshot.m_shape = m_settings.m_shape;
+            snapshot.m_maxDepth = m_settings.m_maxDepth;
             settings = m_settings;
             waves = m_waves;
         }
@@ -330,6 +338,7 @@ namespace JoltBuoyancy
         }
         const JoltWaterVolumeSettings settings = GetSettings();
         snapshot.m_shape = settings.m_shape;
+        snapshot.m_maxDepth = settings.m_maxDepth;
         snapshot.m_fluidDensity = settings.m_fluidDensity;
         snapshot.m_fluidVelocity = settings.m_fluidVelocity;
         snapshot.m_enabled = IsEnabled();
@@ -451,16 +460,33 @@ namespace JoltBuoyancy
             padded = AZ::Vector3(m_dimensions.GetX());
         }
 
+        const AZ::Vector3 halfExtents = padded * 0.5f;
+        AZ::Vector3 localMin = -halfExtents;
+        const AZ::Vector3 localMax = halfExtents;
+
+        // A plane has no floor at the authored Z dimension, and this is the only place that
+        // could honour it. The broadphase query decides which bodies are looked at at all,
+        // so a symmetric box here meant a plane silently stopped applying buoyancy one
+        // Z dimension below its surface while Contains went on calling it water - a body
+        // sinking past that just quietly weighed its full dry weight again.
+        //
+        // Measured from the unpadded surface, so this floor is exactly the one Contains
+        // uses. The wave padding raises the lid and must not also lower the floor, or the
+        // two would drift apart by the wave height.
+        if (m_settings.m_shape == JoltWaterVolumeShape::Plane)
+        {
+            localMin.SetZ(m_dimensions.GetZ() * 0.5f - AZ::GetMax(m_settings.m_maxDepth, 0.0f));
+        }
+
         // The broadphase is queried with an axis-aligned box, so a rotated volume needs
         // the bounds of its corners rather than of its dimensions.
-        const AZ::Vector3 halfExtents = padded * 0.5f;
         m_worldBounds = AZ::Aabb::CreateNull();
         for (int corner = 0; corner < 8; ++corner)
         {
             const AZ::Vector3 localCorner(
-                (corner & 1) ? halfExtents.GetX() : -halfExtents.GetX(),
-                (corner & 2) ? halfExtents.GetY() : -halfExtents.GetY(),
-                (corner & 4) ? halfExtents.GetZ() : -halfExtents.GetZ());
+                (corner & 1) ? localMax.GetX() : localMin.GetX(),
+                (corner & 2) ? localMax.GetY() : localMin.GetY(),
+                (corner & 4) ? localMax.GetZ() : localMin.GetZ());
             m_worldBounds.AddPoint(m_worldTransform.TransformPoint(localCorner));
         }
     }
@@ -620,6 +646,7 @@ namespace JoltBuoyancy
         self.m_dimensions = dimensions;
         self.m_worldBounds = worldBounds;
         self.m_shape = settings.m_shape;
+        self.m_maxDepth = settings.m_maxDepth;
         self.m_fluidDensity = settings.m_fluidDensity;
         self.m_fluidVelocity = settings.m_fluidVelocity;
         self.m_enabled = true;

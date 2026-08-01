@@ -31,7 +31,7 @@ namespace JoltBuoyancy
         //! A sphere, sized by the X dimension. Its surface plane sits at the top of the
         //! sphere, so it reads as a tank filled to the brim.
         Sphere = 1,
-        //! Everything below the surface within a horizontal extent, with no floor. An
+        //! Everything below the surface within a horizontal extent, down to MaxDepth. An
         //! ocean is not a box: a body that sinks past the bottom of one stops being in the
         //! water, which is wrong for open sea. Pair with a follow entity so the broadphase
         //! query box travels with the player instead of spanning the world.
@@ -110,6 +110,26 @@ namespace JoltBuoyancy
 
         //! Which region the water fills.
         JoltWaterVolumeShape m_shape = JoltWaterVolumeShape::Box;
+
+        //! How far below the surface a **Plane** volume reaches, in metres. Ignored by the
+        //! other shapes, which have a floor of their own.
+        //!
+        //! A plane has no floor in the sense that matters - a body does not stop being wet
+        //! at some multiple of the authored Z dimension - but the broadphase is still
+        //! queried with a finite box, and that box decides which bodies are even looked at.
+        //! This is where its bottom goes. `Contains` uses the same number, so the region
+        //! the volume claims and the region it can actually reach are the same region;
+        //! before they were not, and a body sinking past the query box was still reported
+        //! as underwater while silently receiving nothing.
+        //!
+        //! The default is far deeper than any playable world. Lower it if the horizontal
+        //! extent is large and there are many bodies below sea level that never need to
+        //! float, since every body inside the box is examined each step.
+        float m_maxDepth = 10000.0f;
+
+        //! Editor visibility for MaxDepth, which only means anything for a plane. Defined
+        //! with the reflection so the edit context does not reach this header.
+        AZ::u32 GetPlaneDepthVisibility() const;
 
         //! kg/m^3. A body floats when its own density is below this and sinks above it.
         float m_fluidDensity = 1000.0f;

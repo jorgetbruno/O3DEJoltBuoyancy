@@ -1073,6 +1073,72 @@ namespace JoltBuoyancy
         EXPECT_TRUE(snapshot.Contains(AZ::Vector3(0.0f, 0.0f, -500.0f))) << "a plane has no floor";
         EXPECT_FALSE(snapshot.Contains(AZ::Vector3(0.0f, 0.0f, 2.0f))) << "above the surface is not water";
         EXPECT_FALSE(snapshot.Contains(AZ::Vector3(200.0f, 0.0f, -2.0f))) << "outside the extent is not water";
+
+        // And the region the volume claims is the region it can reach. Asserting on
+        // Contains alone is what let the two drift apart: it said bottomless while the
+        // broadphase box the volume is queried through still stopped at the authored Z
+        // dimension, so this box used to end at z = -10.
+        EXPECT_LT(snapshot.m_worldBounds.GetMin().GetZ(), -500.0f)
+            << "the query box has to reach as deep as Contains claims to";
+    }
+
+    TEST_F(JoltWaterVolumeTests, APlaneVolumeFloatsABodyBelowItsNominalDepth)
+    {
+        // The half of "no floor" that Contains cannot prove. Only bodies the broadphase
+        // query returns are looked at, so a query box ending at the authored Z dimension
+        // meant a body sinking past it silently weighed its full dry weight again while
+        // every gameplay query went on reporting it as underwater.
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        settings.m_shape = JoltWaterVolumeShape::Plane;
+        m_waterVolume.SetSettings(settings);
+        // Surface at z = 0, nominal depth 10 m - so the old query box stopped at z = -10.
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -5.0f)), AZ::Vector3(100.0f, 100.0f, 10.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        // Three times the density of the water, and well past that old floor.
+        const AZ::EntityId wreck(0xDEE9Cu);
+        auto sinking = CreateCubeAt(3000.0f, AZ::Vector3(0.0f, 0.0f, -30.0f));
+        SetBodyEntityId(sinking, wreck);
+        ASSERT_TRUE(m_waterVolume.GetSnapshot().Contains(GetBodyPosition(sinking)));
+
+        Simulate(1.0f);
+
+        EXPECT_GT(m_waterVolume.GetSubmergedBodyCount(), 0)
+            << "a body the volume calls water has to be reachable by the volume's own query";
+
+        // Buoyancy cancels a third of gravity for a body three times as dense as the
+        // water, so a second of sinking reaches nowhere near free fall.
+        const float sinkSpeed = GetBodyVelocity(sinking).GetZ();
+        EXPECT_LT(sinkSpeed, 0.0f) << "denser than the water, so it is still going down";
+        EXPECT_GT(sinkSpeed, -9.0f) << "but buoyed, not in free fall - -9.81 would mean it got nothing";
+    }
+
+    TEST_F(JoltWaterVolumeTests, APlaneVolumeStopsAtItsMaximumDepth)
+    {
+        // The floor is configurable rather than absent, because the broadphase has to be
+        // queried with a finite box. What matters is that the number bounding the query is
+        // the same number Contains answers with, in both directions.
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        settings.m_shape = JoltWaterVolumeShape::Plane;
+        settings.m_maxDepth = 20.0f;
+        m_waterVolume.SetSettings(settings);
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -5.0f)), AZ::Vector3(100.0f, 100.0f, 10.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        const JoltWaterVolumeSnapshot snapshot = m_waterVolume.GetSnapshot();
+        EXPECT_TRUE(snapshot.Contains(AZ::Vector3(0.0f, 0.0f, -19.0f))) << "inside the configured depth";
+        EXPECT_FALSE(snapshot.Contains(AZ::Vector3(0.0f, 0.0f, -21.0f))) << "past it is not water";
+        EXPECT_NEAR(snapshot.m_worldBounds.GetMin().GetZ(), -20.0f, 0.01f)
+            << "and the query box bottoms out at exactly the depth Contains stops at";
+
+        // A body below it is genuinely unaffected rather than half-affected.
+        auto lost = CreateCubeAt(500.0f, AZ::Vector3(0.0f, 0.0f, -40.0f)); // light: would float if reached
+        Simulate(1.0f);
+        EXPECT_LT(GetBodyVelocity(lost).GetZ(), -9.0f) << "below the configured depth there is no water at all";
     }
 
     TEST_F(JoltWaterVolumeTests, ShallowWaterShortensTheLongestWaves)

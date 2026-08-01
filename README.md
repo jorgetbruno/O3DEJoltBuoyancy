@@ -180,13 +180,21 @@ along a seam does not change hands every few steps.
 ### Extent
 
 A volume is a **box**, a **sphere**, or a **plane** - everything below the surface within a
-horizontal extent, with no floor. An ocean is not a box: a body that sinks out of the
-bottom of one abruptly weighs its full dry weight again.
+horizontal extent, with no floor at the authored Z dimension. An ocean is not a box: a body
+that sinks out of the bottom of one abruptly weighs its full dry weight again.
 
-Nor can an ocean be one enormous box, because the broadphase is queried with its bounds. A
-volume can **follow an entity**, recentring horizontally each frame so the queried region
-stays small while the water reads as unbounded. Horizontal only - moving the surface with
-the camera would make the sea rise and fall as the player travels.
+"No floor" still needs a number, because **the broadphase is queried with a finite box and
+that query is the only thing deciding which bodies are looked at at all**. `MaxDepth` is
+where the bottom goes, defaulting to 10 km - deeper than any playable world. `Contains`
+answers with the same number, deliberately: the two used to disagree, so a plane silently
+stopped applying buoyancy one Z dimension below its surface while `IsPointUnderwater` went
+on saying the body was in the water. That is the worst shape a bug can take, and the reason
+the two are now computed from one figure rather than described the same way in two places.
+
+Nor can an ocean be one enormous box horizontally. A volume can **follow an entity**,
+recentring horizontally each frame so the queried region stays small while the water reads
+as unbounded. Horizontal only - moving the surface with the camera would make the sea rise
+and fall as the player travels.
 
 ### Sleeping bodies
 
@@ -283,7 +291,7 @@ cmd /c "C:\Users\jorge\O3DE\Projects\JoltPhysicsTest\build-env.cmd cmake --build
 
 ```
 cd build\windows\bin\profile
-.\AzTestRunner.exe JoltBuoyancy.Tests.dll AzRunUnitTests    # 74 tests
+.\AzTestRunner.exe JoltBuoyancy.Tests.dll AzRunUnitTests    # 76 tests
 ```
 
 Check the process exit code, not the console text.
@@ -366,7 +374,7 @@ would end up exactly where it does. Bodies are 1 m³ boxes, so mass *is* density
 tests predict — this is the confirmation the notes this file replaced were still waiting
 on, and it closes the last gap between "the maths is right" and "the feature works".
 
-**Also verified:** the gem and its editor module build; 74/74 unit tests pass against a
+**Also verified:** the gem and its editor module build; 76/76 unit tests pass against a
 real Jolt world; the level prefab is valid with the right editor components and masses;
 the game launcher loads the level and simulates it for 30 s with no crash, exercising
 the `Activate` → `AddStepListener` path that used to crash.
