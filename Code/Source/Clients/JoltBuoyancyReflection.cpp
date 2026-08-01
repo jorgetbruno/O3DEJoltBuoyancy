@@ -160,7 +160,10 @@ namespace JoltBuoyancy
                         ->Attribute(AZ::Edit::Attributes::Min, 0.001f)
                         ->Attribute(AZ::Edit::Attributes::Suffix, " kg/m^3")
                     ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_linearDrag,
-                        "Linear drag", "How strongly the water slows a body down. Higher feels thicker.")
+                        "Linear drag", "How strongly the water slows a body down. Higher feels thicker. A drag "
+                        "coefficient, not a fraction of velocity: the force is quadratic in speed and scales with "
+                        "how much of the body is under the surface, so doubling this does not halve the time to "
+                        "stop. 0.5 is a reasonable starting point.")
                         ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
                     ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_angularDrag,
                         "Angular drag", "How strongly the water damps a body's spin.")
@@ -184,8 +187,9 @@ namespace JoltBuoyancy
                         "Collides with", "Which bodies this water affects. Bodies the group excludes are skipped "
                         "before any impulse is computed.")
                     ->DataElement(AZ::Edit::UIHandlers::CheckBox, &JoltWaterVolumeSettings::m_reportSubmergedFraction,
-                        "Report submerged fraction", "Work out how much of each body is under the surface and publish "
-                        "it on the bus. Costs an extra pass over each body's shape, so it is off by default.")
+                        "Report submerged fraction", "Publish how much of each body is under the surface on the bus. "
+                        "The number is worked out for every body anyway, because the drag needs it, so this only "
+                        "decides whether it is kept.")
                     ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_ownershipHysteresis,
                         "Ownership hysteresis", "How much deeper an overlapping volume must hold a body before it "
                         "takes it over. Stops a body on the seam between two volumes changing hands repeatedly.")

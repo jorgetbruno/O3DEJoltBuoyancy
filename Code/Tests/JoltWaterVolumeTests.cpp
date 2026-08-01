@@ -205,6 +205,18 @@ namespace JoltBuoyancy
             return static_cast<float>(m_physicsSystem->GetBodyInterface().GetPosition(bodyId).GetZ());
         }
 
+        AZ::Vector3 GetBodyVelocity(const JPH::BodyID& bodyId) const
+        {
+            const JPH::Vec3 velocity = m_physicsSystem->GetBodyInterface().GetLinearVelocity(bodyId);
+            return AZ::Vector3(velocity.GetX(), velocity.GetY(), velocity.GetZ());
+        }
+
+        void SetBodyVelocity(const JPH::BodyID& bodyId, const AZ::Vector3& velocity)
+        {
+            m_physicsSystem->GetBodyInterface().SetLinearVelocity(
+                bodyId, JPH::Vec3(velocity.GetX(), velocity.GetY(), velocity.GetZ()));
+        }
+
         //! Water filling z in [-5, 0], so the surface sits at z = 0.
         void CreateWater(float fluidDensity = 1000.0f)
         {
@@ -349,10 +361,13 @@ namespace JoltBuoyancy
         const float sleepingZ = GetBodyZ(cube);
 
         // Water rises over it, deep enough that a floating body would climb well clear.
+        // Not much deeper than that, though: a 5:1 buoyant cube released several metres
+        // down leaves the water entirely on the way up, and this test is about waking a
+        // sleeper, not about how far it breaches.
         m_waterVolume.SetVolume(
-            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, 3.0f)), AZ::Vector3(50.0f, 50.0f, 6.0f));
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, 1.5f)), AZ::Vector3(50.0f, 50.0f, 3.0f));
 
-        Simulate(4.0f);
+        Simulate(6.0f);
 
         EXPECT_GT(GetBodyZ(cube), sleepingZ + 1.0f);
         EXPECT_GT(m_waterVolume.GetSubmergedBodyCount(), 0);
@@ -491,9 +506,14 @@ namespace JoltBuoyancy
         JoltBuoyancyOverrideRegistry::Get().Set(hull, hullOverride);
         SetBodyEntityId(cube, hull);
 
-        Simulate(5.0f);
+        // Long enough to settle. An explicit factor buys buoyancy and no longer buys drag
+        // with it - Jolt infers the water's density from the factor, and the volume divides
+        // that back out - so a hull like this one is a much more lightly damped float than
+        // it used to be, and takes several oscillations to come to rest.
+        Simulate(20.0f);
 
-        // Without the override this is DenseBodySinks, which ends up below -1.5.
+        // Without the override this is DenseBodySinks, which ends up below -1.5. Half out
+        // of the water is where a factor of 2 puts it, so its centre settles around 0.
         EXPECT_GT(GetBodyZ(cube), -1.0f);
 
         JoltBuoyancyOverrideRegistry::Get().Remove(hull);
@@ -702,11 +722,22 @@ namespace JoltBuoyancy
         EXPECT_LT(lightFraction, 0.95f) << "a floating body should be partly out of the water";
     }
 
-    TEST_F(JoltWaterVolumeTests, SubmergedFractionIsZeroUnlessRequested)
+    TEST_F(JoltWaterVolumeTests, SubmergedFractionCanBeTurnedOff)
     {
-        // Off by default, because it costs a second pass over each body's shape.
+        // On by default now. It used to be off because reading it back cost a second pass
+        // over the body's shape; the volume computes the figure once for the drag and hands
+        // it to Jolt rather than letting Jolt work it out again, so all that is left is the
+        // bookkeeping - and this setting only decides whether the number is kept.
         CreateFloor(-4.0f);
-        CreateWater();
+
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        settings.m_reportSubmergedFraction = false;
+        m_waterVolume.SetSettings(settings);
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), AZ::Vector3(50.0f, 50.0f, 5.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
         const AZ::EntityId body(0x0FFu);
         // Dense and still sinking when sampled: fully under the surface, and awake, so it
         // is definitely one of the bodies the volume applied to this step.
@@ -1073,6 +1104,169 @@ namespace JoltBuoyancy
         };
 
         EXPECT_LT(longestWavelength(shallowWaves), longestWavelength(deepWaves));
+    }
+
+    TEST_F(JoltWaterVolumeTests, ChangingTheWaterDepthResynthesisesTheSea)
+    {
+        // Depth is read in one place only - the dispersion solve inside Synthesise - so a
+        // depth that changes without triggering a resynthesis leaves every component on its
+        // deep-water wave number and the slider silently does nothing. The test above sets
+        // the depth before the first synthesis, which is the one path where it works
+        // anyway; this one changes it afterwards, the way the editor and the bus do.
+        const auto longestWavelength = [](const JoltGerstnerWaves& waves)
+        {
+            float longest = 0.0f;
+            for (const JoltGerstnerComponent& component : waves.GetComponents())
+            {
+                longest = AZStd::max(longest, AZ::Constants::TwoPi / component.m_waveNumber);
+            }
+            return longest;
+        };
+
+        JoltWaterVolumeSettings settings;
+        settings.m_wavesEnabled = true;
+        settings.m_spectrum.m_beaufort = 6.0f;
+        settings.m_spectrum.m_waterDepth = 0.0f;
+        m_waterVolume.SetSettings(settings);
+
+        const float deepLongest = longestWavelength(m_waterVolume.GetWaves());
+        ASSERT_GT(deepLongest, 0.0f);
+
+        settings.m_spectrum.m_waterDepth = 3.0f;
+        m_waterVolume.SetSettings(settings);
+
+        EXPECT_LT(longestWavelength(m_waterVolume.GetWaves()), deepLongest)
+            << "changing the depth on its own has to resynthesise, or the setting does nothing";
+    }
+
+    TEST_F(JoltWaterVolumeTests, LinearDragScalesWithHowMuchOfTheBodyIsWet)
+    {
+        // Jolt scales its angular drag by the submerged fraction, but takes the linear drag
+        // area from the whole shape's bounding box. So a hull floating with a tenth of
+        // itself wet dragged as though fully immersed, superstructure included - and that
+        // is the surface-vessel regime, which is most of what floats.
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        settings.m_linearDrag = 0.5f;
+        m_waterVolume.SetSettings(settings);
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), AZ::Vector3(200.0f, 200.0f, 5.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        // Two identical 1 m cubes moving along +X at the same speed. One is well under the
+        // surface; the other floats with 0.1 m of its 1 m depth wet.
+        auto submerged = CreateCubeAt(500.0f, AZ::Vector3(0.0f, -20.0f, -2.0f));
+        auto floating = CreateCubeAt(500.0f, AZ::Vector3(0.0f, 20.0f, 0.4f));
+        SetBodyVelocity(submerged, AZ::Vector3(10.0f, 0.0f, 0.0f));
+        SetBodyVelocity(floating, AZ::Vector3(10.0f, 0.0f, 0.0f));
+
+        // One step, so neither has time to bob and change how wet it is.
+        Simulate(0.02f);
+
+        const float submergedLoss = 10.0f - GetBodyVelocity(submerged).GetX();
+        const float floatingLoss = 10.0f - GetBodyVelocity(floating).GetX();
+
+        EXPECT_GT(submergedLoss, 0.1f) << "the fully immersed cube is dragged";
+        EXPECT_GT(floatingLoss, 0.0f) << "and the floating one still is, just far less";
+        EXPECT_GT(submergedLoss, 4.0f * floatingLoss)
+            << "a tenth submerged should take about a tenth of the drag, not all of it";
+    }
+
+    TEST_F(JoltWaterVolumeTests, AnExplicitBuoyancyFactorDoesNotChangeDrag)
+    {
+        // Jolt infers the density of the water from the buoyancy factor and then drags
+        // with it. In Automatic mode that is right - the factor is a density ratio, so the
+        // body density multiplies back out. Under an explicit factor it is an authored
+        // fudge, and a sealed hull asking for three times the buoyancy to float correctly
+        // would have paid three times the drag for it.
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        settings.m_linearDrag = 0.5f;
+        m_waterVolume.SetSettings(settings);
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), AZ::Vector3(200.0f, 200.0f, 5.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        // A 500 kg cube in 1000 kg/m^3 water has a density-derived factor of 2. One cube
+        // is handed exactly that; the other three times it.
+        const AZ::EntityId modest(0xB0A71u);
+        const AZ::EntityId buoyant(0xB0A72u);
+        auto modestCube = CreateCubeAt(500.0f, AZ::Vector3(0.0f, -20.0f, -2.0f));
+        auto buoyantCube = CreateCubeAt(500.0f, AZ::Vector3(0.0f, 20.0f, -2.0f));
+        SetBodyEntityId(modestCube, modest);
+        SetBodyEntityId(buoyantCube, buoyant);
+
+        JoltBuoyancyOverride modestOverride;
+        modestOverride.m_mode = JoltBuoyancyMode::Explicit;
+        modestOverride.m_factor = 2.0f;
+        JoltBuoyancyOverrideRegistry::Get().Set(modest, modestOverride);
+
+        JoltBuoyancyOverride buoyantOverride = modestOverride;
+        buoyantOverride.m_factor = 6.0f;
+        JoltBuoyancyOverrideRegistry::Get().Set(buoyant, buoyantOverride);
+
+        SetBodyVelocity(modestCube, AZ::Vector3(10.0f, 0.0f, 0.0f));
+        SetBodyVelocity(buoyantCube, AZ::Vector3(10.0f, 0.0f, 0.0f));
+        Simulate(0.02f);
+
+        const AZ::Vector3 modestVelocity = GetBodyVelocity(modestCube);
+        const AZ::Vector3 buoyantVelocity = GetBodyVelocity(buoyantCube);
+        const float modestLoss = 10.0f - modestVelocity.GetX();
+        const float buoyantLoss = 10.0f - buoyantVelocity.GetX();
+
+        EXPECT_GT(modestLoss, 0.1f) << "both cubes are being dragged";
+        EXPECT_NEAR(buoyantLoss, modestLoss, AZStd::max(modestLoss * 0.02f, 1.0e-4f))
+            << "the explicit factor should buy buoyancy and nothing else";
+
+        // And it still buys the buoyancy, which is the point of having it.
+        EXPECT_GT(buoyantVelocity.GetZ(), modestVelocity.GetZ() + 0.5f)
+            << "three times the factor still lifts three times as hard";
+
+        JoltBuoyancyOverrideRegistry::Get().Remove(modest);
+        JoltBuoyancyOverrideRegistry::Get().Remove(buoyant);
+    }
+
+    TEST_F(JoltWaterVolumeTests, TheAnisotropicDragRemainderAlsoScalesWithWetness)
+    {
+        // The remainder above Jolt's isotropic floor is applied by the gem, from the body's
+        // own bounding-box faces, so it had exactly the same full-box mistake available to
+        // it. The numbers here put nine tenths of the drag in the remainder, so a scaling
+        // that only reached Jolt's share would barely move the result.
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        settings.m_linearDrag = 0.2f;
+        m_waterVolume.SetSettings(settings);
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), AZ::Vector3(200.0f, 200.0f, 5.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        const AZ::EntityId broadside(0xB0A73u);
+        const AZ::EntityId awash(0xB0A74u);
+        auto submerged = CreateCubeAt(500.0f, AZ::Vector3(0.0f, -20.0f, -2.0f));
+        auto floating = CreateCubeAt(500.0f, AZ::Vector3(0.0f, 20.0f, 0.4f));
+        SetBodyEntityId(submerged, broadside);
+        SetBodyEntityId(floating, awash);
+
+        // Ten times the drag along X and none of it above the floor on the other axes, so
+        // the isotropic scalar Jolt gets is 1 and the remainder is 9.
+        JoltBuoyancyOverride anisotropic;
+        anisotropic.m_directionalDrag = AZ::Vector3(10.0f, 1.0f, 1.0f);
+        JoltBuoyancyOverrideRegistry::Get().Set(broadside, anisotropic);
+        JoltBuoyancyOverrideRegistry::Get().Set(awash, anisotropic);
+
+        SetBodyVelocity(submerged, AZ::Vector3(10.0f, 0.0f, 0.0f));
+        SetBodyVelocity(floating, AZ::Vector3(10.0f, 0.0f, 0.0f));
+        Simulate(0.02f);
+
+        const float submergedLoss = 10.0f - GetBodyVelocity(submerged).GetX();
+        const float floatingLoss = 10.0f - GetBodyVelocity(floating).GetX();
+
+        EXPECT_GT(submergedLoss, 1.0f) << "the remainder is doing most of the work here";
+        EXPECT_GT(submergedLoss, 4.0f * floatingLoss)
+            << "the remainder's projected area has to shrink with the wetted fraction too";
+
+        JoltBuoyancyOverrideRegistry::Get().Remove(broadside);
+        JoltBuoyancyOverrideRegistry::Get().Remove(awash);
     }
 
     TEST_F(JoltWaterVolumeTests, OverlappingVolumesBlendTheirCurrents)

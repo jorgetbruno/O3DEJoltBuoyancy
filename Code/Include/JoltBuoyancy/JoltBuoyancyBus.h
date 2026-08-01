@@ -113,8 +113,12 @@ namespace JoltBuoyancy
 
         //! kg/m^3. A body floats when its own density is below this and sinks above it.
         float m_fluidDensity = 1000.0f;
+
+        //! Drag coefficients, not fractions of velocity. Both are quadratic in speed and
+        //! both scale with how much of the body is under the surface. See SetLinearDrag.
         float m_linearDrag = 0.5f;
         float m_angularDrag = 0.05f;
+
         AZ::Vector3 m_fluidVelocity = AZ::Vector3::CreateZero();
 
         //! Ripples the surface instead of leaving it a flat plane. The waves ride the
@@ -139,11 +143,14 @@ namespace JoltBuoyancy
         //! debris and not the player.
         AzPhysics::CollisionGroups::Id m_collisionGroupId;
 
-        //! Compute how much of each body is under the surface and publish it through
-        //! GetSubmergedFraction. Off by default: Jolt already works this out inside
-        //! ApplyBuoyancyImpulse but does not hand it back, so asking for it means walking
-        //! the shape a second time.
-        bool m_reportSubmergedFraction = false;
+        //! Publish how much of each body is under the surface through GetSubmergedFraction.
+        //!
+        //! This used to cost a second walk of the shape, because Jolt computes the figure
+        //! inside ApplyBuoyancyImpulse and does not hand it back. The volume now computes
+        //! it once itself and passes it in to Jolt's volume-taking overload - the drag
+        //! needs it for every body regardless - so all that is left is the bookkeeping, and
+        //! it is on by default.
+        bool m_reportSubmergedFraction = true;
 
         //! How much deeper a neighbouring volume has to hold a body before it takes it
         //! over. Without it, a body drifting along the seam between two volumes flips
@@ -165,8 +172,13 @@ namespace JoltBuoyancy
         virtual void SetFluidDensity(float density) = 0;
         virtual float GetFluidDensity() const = 0;
 
-        //! Fraction of a body's velocity removed per second while submerged; higher values
-        //! make the water feel thicker.
+        //! Drag coefficient, not a fraction of velocity. The force is quadratic - roughly
+        //! `0.5 * fluidDensity * drag * area * v * |v|` - with the area taken from the
+        //! body's bounding box projected along the flow and scaled by how much of the body
+        //! is actually under the surface. So doubling this does not double the speed lost
+        //! per second; it doubles the force at a given speed, and the terminal speed goes
+        //! as one over its square root. Higher makes the water feel thicker. Around 0.5 is
+        //! Jolt's suggested starting point.
         virtual void SetLinearDrag(float drag) = 0;
         virtual float GetLinearDrag() const = 0;
         virtual void SetAngularDrag(float drag) = 0;
@@ -298,6 +310,11 @@ namespace JoltBuoyancy
 
         //! The factor used in Explicit mode. Jolt's scale is relative: 1 is neutral and
         //! floats half out of the water, above 1 rides higher, below 1 sinks.
+        //!
+        //! It changes buoyancy and nothing else. Jolt infers the density of the water from
+        //! this factor and then drags with it, so a hull asking for 3 to float correctly
+        //! would have paid three times the drag for it; the volume divides that back out
+        //! before handing the drag over. Use the drag multipliers below to change drag.
         virtual void SetBuoyancyFactor(float factor) = 0;
         virtual float GetBuoyancyFactor() const = 0;
 

@@ -3,6 +3,7 @@
 #include <AzCore/Math/Vector2.h>
 #include <AzCore/Math/Vector3.h>
 #include <AzCore/std/containers/vector.h>
+#include <AzCore/std/utils.h>
 
 #include <JoltBuoyancy/JoltBuoyancyBus.h>
 
@@ -98,6 +99,24 @@ namespace JoltBuoyancy
         const AZStd::vector<JoltGerstnerComponent>& GetComponents() const
         {
             return m_components;
+        }
+
+        //! Replaces the component set outright, bypassing synthesis.
+        //!
+        //! Nothing is derived or corrected: the dispersion relation is not imposed, and the
+        //! shared steepness clamp Synthesise applies to the sum is not applied either. The
+        //! set evaluates to exactly what was handed over, which is the point - it is what
+        //! lets the CPU/GPU parity test pin the evaluation against values worked out by
+        //! hand, rather than against numbers recorded from this implementation. Recorded
+        //! numbers catch later drift but cannot catch an error that was already there when
+        //! they were recorded, and a shader author has nothing to diff against.
+        //!
+        //! Also the way to drive the surface from a hand-tuned wave set or an external
+        //! solver, with the caveat that an unclamped steepness sum above 1 gives a surface
+        //! that self-intersects.
+        void SetComponents(AZStd::vector<JoltGerstnerComponent> components)
+        {
+            m_components = AZStd::move(components);
         }
 
         //! Wind speed in m/s for a Beaufort force, from the standard scale.

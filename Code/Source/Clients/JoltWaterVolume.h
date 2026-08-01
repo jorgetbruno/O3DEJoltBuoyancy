@@ -160,6 +160,17 @@ namespace JoltBuoyancy
         //! Called from Jolt's step listener jobs, once per body, so it must be quick and
         //! safe to call from several threads at once. Pass an empty function to go back to
         //! the built-in surface.
+        //!
+        //! **The returned position's XY must match the query point's XY.** Only its height
+        //! and normal may differ. The multi-sample footprint fit spreads its taps around the
+        //! body and subtracts each tap's own offset back out, which is only meaningful if
+        //! the surface answers about the column of water it was asked about. Return the true
+        //! displaced point of a Gerstner-style surface instead and the samples smear
+        //! sideways. The built-in surface honours this - SampleAbove inverts the horizontal
+        //! displacement and then reports the result at the query column - and a custom
+        //! surface with a horizontal component has to invert it the same way. Note too that
+        //! a custom surface is always multi-sampled: neither the flat-surface nor the
+        //! small-body early-out can reason about a function the gem cannot see inside.
         using SurfaceFunction = AZStd::function<JoltWaterSurfaceSample(const AZ::Vector3& worldPoint)>;
         void SetSurfaceFunction(SurfaceFunction surfaceFunction);
 
@@ -169,7 +180,8 @@ namespace JoltBuoyancy
         JoltWaterSurfaceSample EvaluateSurface(const AZ::Vector3& worldPoint) const;
 
         //! Fraction of the body under the surface last step, 0 to 1. Always 0 unless the
-        //! ReportSubmergedFraction setting is on.
+        //! ReportSubmergedFraction setting is on - which now costs only the bookkeeping,
+        //! since the drag needs the same number for every body anyway.
         float GetSubmergedFraction(AZ::EntityId bodyEntityId) const;
 
         //! Inside the volume and below its surface.
@@ -252,6 +264,14 @@ namespace JoltBuoyancy
         //! buoyancy while this applies at the centre of mass. Setting every axis to the
         //! same value therefore does not reproduce an unsplit drag of that value exactly.
         //! It is close, and the anisotropy is the point.
+        //!
+        //! @param fluidDensity the real fluid density, not the one Jolt infers from the
+        //!        buoyancy factor. OnStep corrects Jolt's figure back to this one, so both
+        //!        halves of the drag are computed against the same water even when an
+        //!        explicit buoyancy factor has been authored.
+        //! @param submergedFraction how much of the body is wet. It scales the projected
+        //!        areas for the same reason Jolt scales its angular drag by it: a hull with
+        //!        a tenth of itself in the water is not dragging its whole bounding box.
         static void ApplyExtraHydrodynamics(
             JPH::Body& body,
             const JoltBuoyancyOverride& bodyOverride,
@@ -260,6 +280,7 @@ namespace JoltBuoyancy
             float baseLinearDrag,
             float isotropicScale,
             float submergedVolume,
+            float submergedFraction,
             const AZ::Vector3& previousVelocity,
             bool hadPreviousVelocity,
             float deltaTime);

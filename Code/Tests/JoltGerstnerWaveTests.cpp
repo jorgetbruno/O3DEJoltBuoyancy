@@ -3,6 +3,8 @@
 
 #include <Clients/JoltGerstnerWaves.h>
 
+#include <AzCore/Math/MathUtils.h>
+
 #include <cmath>
 
 namespace JoltBuoyancy
@@ -295,31 +297,40 @@ namespace JoltBuoyancy
     class JoltGerstnerParityTests : public ::testing::Test
     {
     protected:
-        //! Two components, chosen by hand so the expected values do not depend on the
-        //! synthesis or on anything that might reasonably be retuned.
-        static JoltGerstnerWaves ReferenceWaves()
+        //! One wave, built by hand rather than synthesised, so every expected value below
+        //! is derived from the formula instead of recorded from this implementation.
+        //!
+        //! A = 1 m, k = 1 (so a wavelength of 2*pi), Q = 0.5, phase 0, and the deep-water
+        //! frequency for that wave number. Everything follows from
+        //!     x -> x + Q A d.x cos(theta),   z -> A sin(theta),   theta = k (d.p) - phase
+        static JoltGerstnerWaves HandBuiltWave(const AZ::Vector2& direction)
         {
-            JoltWaterSpectrum spectrum;
-            spectrum.m_beaufort = 0.0f; // synthesise nothing, then fill in by hand
+            JoltGerstnerComponent component;
+            component.m_direction = direction;
+            component.m_amplitude = 1.0f;
+            component.m_waveNumber = 1.0f;
+            component.m_angularFrequency = std::sqrt(JoltGerstnerWaves::Gravity * 1.0f);
+            component.m_steepness = 0.5f;
+            component.m_phase = 0.0f;
+
             JoltGerstnerWaves waves;
-            waves.Synthesise(spectrum);
+            waves.SetComponents({ component });
             return waves;
+        }
+
+        //! omega for the hand-built wave, which several expected velocities are written in
+        //! terms of.
+        static float ReferenceFrequency()
+        {
+            return std::sqrt(JoltGerstnerWaves::Gravity);
         }
     };
 
-    TEST_F(JoltGerstnerParityTests, AKnownWaveEvaluatesToKnownValues)
+    TEST_F(JoltGerstnerParityTests, ACalmSurfaceIsTheMeanHeight)
     {
-        // A single wave travelling along +X: amplitude 1 m, wavelength 2*pi so k = 1,
-        // steepness 0.5, zero phase. Everything below follows from
-        //     z = A sin(k x - phase),  x displaced by Q A cos(k x - phase)
-        // and can be checked by hand.
-        JoltGerstnerWaves waves = ReferenceWaves();
-        ASSERT_TRUE(waves.IsEmpty()) << "the reference set is built by hand, not synthesised";
+        JoltGerstnerWaves waves;
+        ASSERT_TRUE(waves.IsEmpty());
 
-        // At the origin with zero phase: sin(0) = 0, cos(0) = 1.
-        //   height    = 0
-        //   x offset  = Q * A = 0.5
-        // A flat sea has to agree too, which is what an empty set gives.
         const JoltGerstnerSample calm = waves.Evaluate(AZ::Vector2(3.0f, -2.0f), 7.0f);
         EXPECT_FLOAT_EQ(calm.m_position.GetX(), 3.0f);
         EXPECT_FLOAT_EQ(calm.m_position.GetY(), -2.0f);
@@ -327,6 +338,133 @@ namespace JoltBuoyancy
         EXPECT_FLOAT_EQ(calm.m_normal.GetZ(), 1.0f);
         EXPECT_FLOAT_EQ(calm.m_jacobian, 1.0f) << "an undisturbed surface is not folding";
         EXPECT_TRUE(calm.m_velocity.IsZero()) << "still water does not orbit";
+    }
+
+    TEST_F(JoltGerstnerParityTests, AKnownWaveEvaluatesToKnownValuesAtAZeroCrossing)
+    {
+        // A single wave along +X, evaluated at the origin. theta = 0, so sin = 0, cos = 1:
+        //   z        = A sin(0)                = 0
+        //   x        = 0 + Q A cos(0)          = 0.5
+        //   dz/dx    = k A cos(0)              = 1        (the surface climbs at 45 degrees)
+        //   dx/dx    = 1 - Q k A sin(0)        = 1
+        //   normal   = normalize((1,0,1) x (0,1,0)) = (-1, 0, 1)/sqrt(2)
+        //   jacobian = dx/dx * dy/dy - (dx/dy)^2   = 1
+        //   velocity = (0, 0, -omega A cos(0))     = (0, 0, -omega)
+        const JoltGerstnerWaves waves = HandBuiltWave(AZ::Vector2(1.0f, 0.0f));
+        ASSERT_EQ(waves.GetComponents().size(), 1u);
+
+        const JoltGerstnerSample sample = waves.Evaluate(AZ::Vector2(0.0f, 0.0f), 0.0f);
+        EXPECT_NEAR(sample.m_position.GetX(), 0.5f, 1.0e-5f);
+        EXPECT_NEAR(sample.m_position.GetY(), 0.0f, 1.0e-5f);
+        EXPECT_NEAR(sample.m_position.GetZ(), 0.0f, 1.0e-5f);
+
+        const float invRoot2 = 1.0f / std::sqrt(2.0f);
+        EXPECT_NEAR(sample.m_normal.GetX(), -invRoot2, 1.0e-5f) << "the normal leans back down the rising face";
+        EXPECT_NEAR(sample.m_normal.GetY(), 0.0f, 1.0e-5f);
+        EXPECT_NEAR(sample.m_normal.GetZ(), invRoot2, 1.0e-5f);
+
+        EXPECT_NEAR(sample.m_jacobian, 1.0f, 1.0e-5f);
+        EXPECT_NEAR(sample.m_velocity.GetX(), 0.0f, 1.0e-5f);
+        EXPECT_NEAR(sample.m_velocity.GetZ(), -ReferenceFrequency(), 1.0e-4f)
+            << "on the way up the face, the water itself is moving down";
+    }
+
+    TEST_F(JoltGerstnerParityTests, AKnownWaveEvaluatesToKnownValuesAtACrestAndATrough)
+    {
+        const JoltGerstnerWaves waves = HandBuiltWave(AZ::Vector2(1.0f, 0.0f));
+        const float omega = ReferenceFrequency();
+
+        // Crest: k x = pi/2, so sin = 1, cos = 0.
+        //   z        = A                       = 1
+        //   x offset = Q A cos(pi/2)           = 0        (undisplaced at the crest)
+        //   dz/dx    = k A cos(pi/2)           = 0        (flat on top)
+        //   dx/dx    = 1 - Q k A sin(pi/2)     = 0.5      (compressed toward the crest)
+        //   velocity = (omega Q A sin, 0, 0)   = (0.5 omega, 0, 0)
+        const JoltGerstnerSample crest = waves.Evaluate(AZ::Vector2(AZ::Constants::HalfPi, 0.0f), 0.0f);
+        EXPECT_NEAR(crest.m_position.GetX(), AZ::Constants::HalfPi, 1.0e-5f);
+        EXPECT_NEAR(crest.m_position.GetZ(), 1.0f, 1.0e-5f);
+        EXPECT_NEAR(crest.m_normal.GetZ(), 1.0f, 1.0e-5f) << "a crest is a stationary point, so the normal is up";
+        EXPECT_NEAR(crest.m_jacobian, 0.5f, 1.0e-5f) << "1 - Q k A, the compression that foam keys off";
+        EXPECT_NEAR(crest.m_velocity.GetX(), 0.5f * omega, 1.0e-4f) << "at a crest the water runs with the wave";
+
+        // Trough: k x = -pi/2, so sin = -1, cos = 0. Same terms with the sign flipped, and
+        // the surface stretches rather than compressing.
+        const JoltGerstnerSample trough = waves.Evaluate(AZ::Vector2(-AZ::Constants::HalfPi, 0.0f), 0.0f);
+        EXPECT_NEAR(trough.m_position.GetZ(), -1.0f, 1.0e-5f);
+        EXPECT_NEAR(trough.m_jacobian, 1.5f, 1.0e-5f) << "1 + Q k A: a trough is stretched, and never foams";
+        EXPECT_NEAR(trough.m_velocity.GetX(), -0.5f * omega, 1.0e-4f) << "in a trough the water runs against it";
+    }
+
+    TEST_F(JoltGerstnerParityTests, ADiagonalWavePinsTheCrossDerivative)
+    {
+        // Everything above travels along an axis, where dx/dy is identically zero - so a
+        // shader that wrote d.x*d.x where it meant d.x*d.y would pass every one of them.
+        // This wave runs along (0.6, 0.8), which makes the three second-derivative terms
+        // -Q k A times 0.36, 0.48 and 0.64: all different, so a swap changes the answer.
+        const JoltGerstnerWaves waves = HandBuiltWave(AZ::Vector2(0.6f, 0.8f));
+
+        // At the crest, d.p = pi/2 with |d| = 1, so p = (0.6, 0.8) * pi/2.
+        //   dx/dx    = 1 - 0.5 * 0.36 = 0.82
+        //   dx/dy    =   - 0.5 * 0.48 = -0.24
+        //   dy/dy    = 1 - 0.5 * 0.64 = 0.68
+        //   jacobian = 0.82 * 0.68 - 0.24^2 = 0.5
+        const AZ::Vector2 crestPoint(0.6f * AZ::Constants::HalfPi, 0.8f * AZ::Constants::HalfPi);
+        const JoltGerstnerSample crest = waves.Evaluate(crestPoint, 0.0f);
+        EXPECT_NEAR(crest.m_position.GetZ(), 1.0f, 1.0e-5f);
+        EXPECT_NEAR(crest.m_jacobian, 0.5f, 1.0e-5f)
+            << "the crest jacobian is 1 - Q k A whatever direction the wave runs in";
+        EXPECT_NEAR(crest.m_normal.GetZ(), 1.0f, 1.0e-5f);
+
+        // And at the zero crossing the normal is direction-sensitive:
+        //   dz/dx  = k A d.x = 0.6,  dz/dy = k A d.y = 0.8
+        //   normal = normalize((-0.6, -0.8, 1))
+        const JoltGerstnerSample crossing = waves.Evaluate(AZ::Vector2(0.0f, 0.0f), 0.0f);
+        const float scale = 1.0f / std::sqrt(2.0f);
+        EXPECT_NEAR(crossing.m_normal.GetX(), -0.6f * scale, 1.0e-5f);
+        EXPECT_NEAR(crossing.m_normal.GetY(), -0.8f * scale, 1.0e-5f);
+        EXPECT_NEAR(crossing.m_normal.GetZ(), scale, 1.0e-5f);
+
+        // Displaced along the direction of travel, by Q A in total.
+        EXPECT_NEAR(crossing.m_position.GetX(), 0.5f * 0.6f, 1.0e-5f);
+        EXPECT_NEAR(crossing.m_position.GetY(), 0.5f * 0.8f, 1.0e-5f);
+    }
+
+    TEST_F(JoltGerstnerParityTests, ComponentsAccumulateRatherThanReplace)
+    {
+        // Two waves whose contributions at the sample point are distinguishable, so a loop
+        // that assigned instead of accumulating would give one of them rather than the sum.
+        JoltGerstnerComponent first;
+        first.m_direction = AZ::Vector2(1.0f, 0.0f);
+        first.m_amplitude = 1.0f;
+        first.m_waveNumber = 1.0f;
+        first.m_angularFrequency = std::sqrt(JoltGerstnerWaves::Gravity);
+        first.m_steepness = 0.5f;
+        first.m_phase = 0.0f;
+
+        // Quarter of a turn behind, so at the origin its theta is -3pi/2 and sin is +1.
+        // No steepness, so it contributes height but no horizontal displacement.
+        JoltGerstnerComponent second;
+        second.m_direction = AZ::Vector2(1.0f, 0.0f);
+        second.m_amplitude = 0.5f;
+        second.m_waveNumber = 2.0f;
+        second.m_angularFrequency = std::sqrt(JoltGerstnerWaves::Gravity * 2.0f);
+        second.m_steepness = 0.0f;
+        second.m_phase = 1.5f * AZ::Constants::Pi;
+
+        JoltGerstnerWaves waves;
+        waves.SetComponents({ first, second });
+
+        // At the origin: first gives z = 0 and x += 0.5; second gives z += 0.5 and x += 0.
+        const JoltGerstnerSample sample = waves.Evaluate(AZ::Vector2(0.0f, 0.0f), 0.0f);
+        EXPECT_NEAR(sample.m_position.GetX(), 0.5f, 1.0e-5f) << "only the steep component displaces horizontally";
+        EXPECT_NEAR(sample.m_position.GetZ(), 0.5f, 1.0e-5f) << "the heights add: 0 from one, 0.5 from the other";
+
+        // dz/dx = 1*1*cos(0) + 2*0.5*cos(-3pi/2) = 1 + 0, and only the first is steep, so
+        // the jacobian is still 1.
+        EXPECT_NEAR(sample.m_jacobian, 1.0f, 1.0e-5f);
+        const float invRoot2 = 1.0f / std::sqrt(2.0f);
+        EXPECT_NEAR(sample.m_normal.GetX(), -invRoot2, 1.0e-5f);
+        EXPECT_NEAR(sample.m_normal.GetZ(), invRoot2, 1.0e-5f);
     }
 
     TEST_F(JoltGerstnerParityTests, TheSynthesisedSeaMatchesRecordedReferenceValues)

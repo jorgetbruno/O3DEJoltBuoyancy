@@ -115,7 +115,11 @@ own current per body.
 with something the gem knows nothing about. The volume still decides *which* bodies are
 considered, since that comes from its bounds - which are padded by the summed wave
 amplitude and the horizontal displacement, so a body riding a crest does not fall out of
-the broadphase query.
+the broadphase query. One contract on it: **the returned position's XY must equal the query
+point's XY** - only height and normal may differ. The footprint fit subtracts each tap's own
+offset back out, so a surface that answers about a different column smears its samples
+sideways. The built-in one honours this by inverting the displacement and then reporting at
+the column it was asked about.
 
 **Why a spectrum and not a component list.** An FFT ocean consumes the same thing:
 Tessendorf synthesis runs over a Phillips or JONSWAP spectrum. Swapping the Gerstner sum
@@ -139,6 +143,22 @@ quadratic, area-projected form. That split is approximate - each half clamps ind
 and Jolt applies at the centre of buoyancy while the remainder applies at the centre of
 mass - so setting all three axes alike does not exactly reproduce an unsplit drag. The
 anisotropy is the point.
+
+Two things Jolt gets wrong for a surface vessel, and both are corrected here. It scales its
+**angular** drag by the submerged fraction but takes the **linear** drag area from the whole
+shape's bounding box, so a hull floating with a tenth of itself wet dragged as though fully
+immersed - superstructure included. And it infers the density of the water from the buoyancy
+factor, `fluid_density = buoyancy / (totalVolume * inverseMass)`, which is exactly right in
+Automatic mode (the factor is a density ratio, so the body density multiplies back out) and
+wrong under an Explicit one, where a sealed hull asking for a factor of 3 to float correctly
+paid three times the drag for it. The volume works out the submerged volume itself and hands
+it to Jolt's volume-taking `ApplyBuoyancyImpulse` overload rather than letting Jolt compute
+it and keep it, so both corrections cost nothing - it is the same single walk of the shape
+either way, and reading the submerged fraction back is now free too.
+
+An explicit factor therefore buys buoyancy and only buoyancy. It also makes such a hull a
+far more lightly damped float than it was, which is the correct physics and worth knowing
+before retuning anything.
 
 **Added mass** is genuinely missing from Jolt and is approximated. Doing it properly means
 adding to the solver's mass matrix, which Jolt does not expose, so this resists the change
@@ -263,7 +283,7 @@ cmd /c "C:\Users\jorge\O3DE\Projects\JoltPhysicsTest\build-env.cmd cmake --build
 
 ```
 cd build\windows\bin\profile
-.\AzTestRunner.exe JoltBuoyancy.Tests.dll AzRunUnitTests    # 66 tests
+.\AzTestRunner.exe JoltBuoyancy.Tests.dll AzRunUnitTests    # 74 tests
 ```
 
 Check the process exit code, not the console text.
@@ -273,7 +293,17 @@ physics gem's scene, so the gem is testable on its own — which also proves the
 dependency is all it needs. It covers flotation by density, tilted volumes, compound
 shapes, sphere volumes, waves and custom surfaces, per-body overrides and drag
 multipliers, enter/exit events, submerged fraction, sleeping bodies waking and staying
-counted, and the overlap cases including a body straddling two adjacent volumes.
+counted, the drag corrections above (a tenth-submerged body taking about a tenth of the
+drag, and an explicit factor changing lift without changing drag), and the overlap cases
+including a body straddling two adjacent volumes.
+
+`JoltGerstnerWaveTests.cpp` ends with the CPU/GPU parity fixture. Those cases evaluate wave
+sets **built by hand** — `SetComponents` bypasses synthesis — against values derived from
+the formula in the comment above each assertion, not recorded from this implementation.
+Recorded numbers catch later drift but cannot catch an error that was already there when
+they were written down, and they give a shader author nothing to diff against. One case
+runs a wave diagonally on purpose: everything axis-aligned has a zero cross-derivative, so
+a shader that wrote `d.x * d.x` where it meant `d.x * d.y` would pass all the rest.
 
 `JoltWaterVolumeComponentTests.cpp` covers the layer above: a setter that updated only
 the component's own copy and never reached the volume would pass every physics test and
@@ -336,7 +366,7 @@ would end up exactly where it does. Bodies are 1 m³ boxes, so mass *is* density
 tests predict — this is the confirmation the notes this file replaced were still waiting
 on, and it closes the last gap between "the maths is right" and "the feature works".
 
-**Also verified:** the gem and its editor module build; 66/66 unit tests pass against a
+**Also verified:** the gem and its editor module build; 74/74 unit tests pass against a
 real Jolt world; the level prefab is valid with the right editor components and masses;
 the game launcher loads the level and simulates it for 30 s with no crash, exercising
 the `Activate` → `AddStepListener` path that used to crash.
