@@ -934,6 +934,93 @@ namespace JoltBuoyancy
         JoltBuoyancyOverrideRegistry::Get().Remove(streamlined);
     }
 
+    TEST_F(JoltWaterVolumeTests, DirectionalDragLetsAHullHoldItsHeading)
+    {
+        // Jolt's drag is already quadratic and already varies with the projected area of
+        // the body's bounding box - it is not isotropic. What a box cannot express is a
+        // hull being far more streamlined along its length than across it, which is what
+        // this override adds, and what stops a boat sliding sideways through a turn.
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        settings.m_linearDrag = 3.0f;
+        m_waterVolume.SetSettings(settings);
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), AZ::Vector3(400.0f, 400.0f, 5.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        const AZ::EntityId hullId(0x5111Du);
+        auto hull = CreateCubeAt(800.0f, AZ::Vector3(0.0f, -8.0f, -2.0f));
+        auto plain = CreateCubeAt(800.0f, AZ::Vector3(0.0f, 8.0f, -2.0f));
+        SetBodyEntityId(hull, hullId);
+
+        // Streamlined along X, ordinary across it.
+        JoltBuoyancyOverride hullOverride;
+        hullOverride.m_directionalDrag = AZ::Vector3(0.05f, 1.0f, 1.0f);
+        JoltBuoyancyOverrideRegistry::Get().Set(hullId, hullOverride);
+
+        const JPH::Vec3 alongX(10.0f, 0.0f, 0.0f);
+        m_physicsSystem->GetBodyInterface().SetLinearVelocity(hull, alongX);
+        m_physicsSystem->GetBodyInterface().SetLinearVelocity(plain, alongX);
+
+        Simulate(2.0f);
+
+        EXPECT_GT(GetBodyPosition(hull).GetX(), GetBodyPosition(plain).GetX() + 1.0f)
+            << "the streamlined axis should keep more of its way on";
+
+        // The anisotropy itself: the same hull, the same shove, across its beam instead of
+        // along its length, must not carry nearly as far. Compared against itself rather
+        // than against the unmodified body, because the drag is split between Jolt and the
+        // extra pass and the two clamp independently - the total is deliberately not
+        // identical to a single unsplit drag of the same magnitude.
+        const float travelledAlongAxis = GetBodyPosition(hull).GetX();
+
+        auto hullSideways = CreateCubeAt(800.0f, AZ::Vector3(-60.0f, -8.0f, -2.0f));
+        SetBodyEntityId(hullSideways, hullId);
+        m_physicsSystem->GetBodyInterface().SetLinearVelocity(hullSideways, JPH::Vec3(0.0f, 10.0f, 0.0f));
+
+        Simulate(2.0f);
+        const float travelledAcrossAxis = GetBodyPosition(hullSideways).GetY() - (-8.0f);
+
+        EXPECT_GT(travelledAlongAxis, travelledAcrossAxis * 2.0f)
+            << "a hull streamlined along X should carry much further along it than across it";
+
+        JoltBuoyancyOverrideRegistry::Get().Remove(hullId);
+    }
+
+    TEST_F(JoltWaterVolumeTests, AddedMassDampsAccelerationWithoutStoppingTheBody)
+    {
+        // Water dragged along with the hull. Jolt has no notion of it, and doing it
+        // properly needs the solver's mass matrix, so this resists changes in velocity
+        // after the fact - enough to take the twitchiness out of heave.
+        CreateWater();
+
+        const AZ::EntityId heavyWater(0xADDEDu);
+        auto withAddedMass = CreateCubeAt(500.0f, AZ::Vector3(0.0f, -6.0f, -2.0f));
+        auto without = CreateCubeAt(500.0f, AZ::Vector3(0.0f, 6.0f, -2.0f));
+        SetBodyEntityId(withAddedMass, heavyWater);
+
+        JoltBuoyancyOverride addedMassOverride;
+        addedMassOverride.m_addedMass = 1.5f;
+        JoltBuoyancyOverrideRegistry::Get().Set(heavyWater, addedMassOverride);
+
+        // Both start at rest and are floated by the same water, so the only difference is
+        // how quickly they can change velocity.
+        Simulate(0.35f);
+
+        const float withSpeed = AZStd::abs(
+            static_cast<float>(m_physicsSystem->GetBodyInterface().GetLinearVelocity(withAddedMass).GetZ()));
+        const float withoutSpeed = AZStd::abs(
+            static_cast<float>(m_physicsSystem->GetBodyInterface().GetLinearVelocity(without).GetZ()));
+
+        EXPECT_LT(withSpeed, withoutSpeed) << "added mass should slow how fast the body picks up speed";
+
+        // It damps acceleration, not motion: the body still rises to the surface.
+        Simulate(6.0f);
+        EXPECT_GT(GetBodyPosition(withAddedMass).GetZ(), -1.5f);
+
+        JoltBuoyancyOverrideRegistry::Get().Remove(heavyWater);
+    }
+
     TEST_F(JoltWaterVolumeTests, AttachingToNothingFails)
     {
         EXPECT_FALSE(m_waterVolume.AttachToPhysicsSystem(nullptr));

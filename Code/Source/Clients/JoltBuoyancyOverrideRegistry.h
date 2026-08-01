@@ -16,6 +16,22 @@ namespace JoltBuoyancy
         //! Scale the volume's drag for this body. 1 leaves it alone.
         float m_linearDragMultiplier = 1.0f;
         float m_angularDragMultiplier = 1.0f;
+
+        //! Per body-axis drag scale, refining what Jolt already derives from the body's
+        //! bounding box. Jolt is not isotropic - it projects the box along the flow - but a
+        //! hull is far more streamlined along its length than its box suggests, and no box
+        //! can express that. Lowering the forward axis is what lets a boat hold a heading
+        //! instead of sliding sideways through turns.
+        AZ::Vector3 m_directionalDrag = AZ::Vector3::CreateOne();
+
+        //! Added-mass coefficient: water dragged along with the hull, as a fraction of the
+        //! displaced mass. 0 is off, around 0.5 is typical for a blunt body.
+        //!
+        //! An approximation, and deliberately so. Doing it properly means altering the
+        //! solver's mass matrix, which Jolt does not expose, so this resists changes in
+        //! velocity after the fact instead. It takes the twitchiness out of heave and pitch
+        //! without pretending to be the real thing.
+        float m_addedMass = 0.0f;
         bool m_excluded = false;
     };
 

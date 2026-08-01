@@ -283,6 +283,18 @@ namespace JoltBuoyancy
         virtual float GetLinearDragMultiplier() const = 0;
         virtual void SetAngularDragMultiplier(float multiplier) = 0;
         virtual float GetAngularDragMultiplier() const = 0;
+
+        //! Per body-axis drag scale. Jolt already varies drag with the projected area of
+        //! the body's bounding box, so this refines that rather than introducing it - a
+        //! hull is much more streamlined along its length than any box can express.
+        virtual void SetDirectionalDrag(const AZ::Vector3& perAxisScale) = 0;
+        virtual AZ::Vector3 GetDirectionalDrag() const = 0;
+
+        //! Added mass: water dragged along with the body, as a fraction of the mass it
+        //! displaces. Takes the twitchiness out of heave and pitch. An approximation -
+        //! see JoltBuoyancyOverride for what it does and does not do.
+        virtual void SetAddedMass(float coefficient) = 0;
+        virtual float GetAddedMass() const = 0;
     };
 
     using JoltBuoyancyOverrideRequestBus = AZ::EBus<JoltBuoyancyOverrideRequests>;

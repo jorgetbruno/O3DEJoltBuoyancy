@@ -18,6 +18,8 @@ namespace JoltBuoyancy
                 ->Field("Excluded", &JoltBuoyancyOverrideComponent::m_excluded)
                 ->Field("LinearDragMultiplier", &JoltBuoyancyOverrideComponent::m_linearDragMultiplier)
                 ->Field("AngularDragMultiplier", &JoltBuoyancyOverrideComponent::m_angularDragMultiplier)
+                ->Field("DirectionalDrag", &JoltBuoyancyOverrideComponent::m_directionalDrag)
+                ->Field("AddedMass", &JoltBuoyancyOverrideComponent::m_addedMass)
                 ;
 
             if (AZ::EditContext* editContext = serializeContext->GetEditContext())
@@ -48,6 +50,16 @@ namespace JoltBuoyancy
                         ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
                     ->DataElement(AZ::Edit::UIHandlers::Default, &JoltBuoyancyOverrideComponent::m_angularDragMultiplier,
                         "Angular drag scale", "Scales how strongly the water damps this body's spin.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltBuoyancyOverrideComponent::m_directionalDrag,
+                        "Directional drag", "Per body-axis drag scale. Jolt already varies drag with the projected "
+                        "area of the bounding box; lower the forward axis to make a hull streamlined along its "
+                        "length, which is what lets a boat hold a heading.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltBuoyancyOverrideComponent::m_addedMass,
+                        "Added mass", "Water dragged along with the body, as a fraction of the mass it displaces. "
+                        "Around 0.5 for a blunt hull. An approximation: Jolt does not expose the mass matrix, so "
+                        "this resists velocity changes after the fact.")
                         ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
                     ;
             }
@@ -83,6 +95,8 @@ namespace JoltBuoyancy
         override.m_factor = m_factor;
         override.m_linearDragMultiplier = m_linearDragMultiplier;
         override.m_angularDragMultiplier = m_angularDragMultiplier;
+        override.m_directionalDrag = m_directionalDrag;
+        override.m_addedMass = m_addedMass;
         override.m_excluded = m_excluded;
         JoltBuoyancyOverrideRegistry::Get().Set(GetEntityId(), override);
     }
@@ -140,5 +154,27 @@ namespace JoltBuoyancy
     float JoltBuoyancyOverrideComponent::GetAngularDragMultiplier() const
     {
         return m_angularDragMultiplier;
+    }
+
+    void JoltBuoyancyOverrideComponent::SetDirectionalDrag(const AZ::Vector3& perAxisScale)
+    {
+        m_directionalDrag = perAxisScale;
+        Publish();
+    }
+
+    AZ::Vector3 JoltBuoyancyOverrideComponent::GetDirectionalDrag() const
+    {
+        return m_directionalDrag;
+    }
+
+    void JoltBuoyancyOverrideComponent::SetAddedMass(float coefficient)
+    {
+        m_addedMass = coefficient;
+        Publish();
+    }
+
+    float JoltBuoyancyOverrideComponent::GetAddedMass() const
+    {
+        return m_addedMass;
     }
 } // namespace JoltBuoyancy

@@ -21,11 +21,13 @@
 #include <Jolt/Physics/Body/BodyID.h>
 #include <Jolt/Physics/PhysicsStepListener.h>
 
+#include <Clients/JoltBuoyancyOverrideRegistry.h>
 #include <Clients/JoltGerstnerWaves.h>
 #include <JoltBuoyancy/JoltBuoyancyBus.h>
 
 namespace JPH
 {
+    class Body;
     class PhysicsSystem;
 }
 
@@ -230,6 +232,32 @@ namespace JoltBuoyancy
         //! time a layer is seen rather than on every step from a job thread.
         bool ObjectLayerPassesFilter(AZ::u32 objectLayer, AZ::u64 collidesWithMask) const;
 
+        //! Applies the hydrodynamics Jolt does not: the anisotropic remainder of a body's
+        //! directional drag, and an added-mass approximation.
+        //!
+        //! Jolt already does more than it is usually given credit for - its drag is
+        //! quadratic, and it varies with the projected area of the body's bounding box
+        //! along the flow. What it cannot express is a hull being far more streamlined than
+        //! its box, and it has no notion of added mass at all.
+        //!
+        //! The drag split is approximate. Jolt takes one scalar, so it gets the isotropic
+        //! floor and this adds the per-axis remainder; but each half clamps itself against
+        //! the current velocity independently, and Jolt applies its share at the centre of
+        //! buoyancy while this applies at the centre of mass. Setting every axis to the
+        //! same value therefore does not reproduce an unsplit drag of that value exactly.
+        //! It is close, and the anisotropy is the point.
+        static void ApplyExtraHydrodynamics(
+            JPH::Body& body,
+            const JoltBuoyancyOverride& bodyOverride,
+            const AZ::Vector3& waterVelocity,
+            float fluidDensity,
+            float baseLinearDrag,
+            float isotropicScale,
+            float submergedVolume,
+            const AZ::Vector3& previousVelocity,
+            bool hadPreviousVelocity,
+            float deltaTime);
+
         //! Swaps in this step's submerged set, queueing an enter or exit for every body
         //! that joined or left it.
         void PublishSubmergedSet(
@@ -289,6 +317,10 @@ namespace JoltBuoyancy
         //! next step's set to raise enter and exit events.
         mutable AZStd::mutex m_submergedMutex;
         AZStd::unordered_map<AZ::EntityId, float> m_submerged;
+
+        //! Last step's linear velocity per body, for the added-mass approximation, which
+        //! resists changes in velocity rather than velocity itself.
+        AZStd::unordered_map<AZ::EntityId, AZ::Vector3> m_previousVelocities;
 
         AZStd::mutex m_pendingEventMutex;
         AZStd::vector<JoltWaterVolumeEvent> m_pendingEvents;

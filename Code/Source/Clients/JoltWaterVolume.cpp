@@ -608,6 +608,10 @@ namespace JoltBuoyancy
         AZStd::unordered_map<AZ::EntityId, float> entrySpeeds;
         AZStd::unordered_set<AZ::EntityId> ownedThisStep;
 
+        // Added mass resists the change in velocity, so it needs last step's.
+        AZStd::unordered_map<AZ::EntityId, AZ::Vector3> velocitiesThisStep;
+        const AZStd::unordered_map<AZ::EntityId, AZ::Vector3>& previousVelocities = m_previousVelocities;
+
         // Who was in the water last step. A sleeping body is not processed, but it has not
         // left the water either, so it is carried across rather than reported as an exit.
         AZStd::unordered_map<AZ::EntityId, float> previouslySubmerged;
@@ -774,8 +778,19 @@ namespace JoltBuoyancy
 
             // Per-body drag multipliers: a streamlined hull cuts through water that its
             // weight alone would say should slow it down.
-            const float linearDrag = settings.m_linearDrag * AZStd::max(bodyOverride.m_linearDragMultiplier, 0.0f);
+            //
+            // Jolt takes one scalar, so it gets the isotropic floor of the per-axis scales
+            // and ApplyExtraHydrodynamics adds back whatever each axis asked for above it.
+            // Handing Jolt the largest instead would mean over-damping the streamlined
+            // axis and having no way to take it back.
+            const AZ::Vector3 perAxisScale =
+                bodyOverride.m_directionalDrag * AZStd::max(bodyOverride.m_linearDragMultiplier, 0.0f);
+            const float isotropicScale = AZ::GetMax(perAxisScale.GetMinElement(), 0.0f);
+            const float linearDrag = settings.m_linearDrag * isotropicScale;
             const float angularDrag = settings.m_angularDrag * AZStd::max(bodyOverride.m_angularDragMultiplier, 0.0f);
+
+            const bool needsHydrodynamics =
+                bodyOverride.m_addedMass > 0.0f || perAxisScale.GetMaxElement() > isotropicScale + 1.0e-4f;
 
             // The volume's own current plus the water's orbital motion at this body.
             // Passing only the current makes the sea a conveyor belt; the orbital part is
@@ -789,14 +804,16 @@ namespace JoltBuoyancy
                 ++submergedCount;
 
                 float submergedFraction = 0.0f;
-                if (settings.m_reportSubmergedFraction && shape)
+                float submergedVolume = 0.0f;
+                // Computed when anything actually needs it: the reporting setting, or a
+                // body whose hydrodynamics depend on how much of it is wet.
+                if ((settings.m_reportSubmergedFraction || needsHydrodynamics) && shape)
                 {
                     // Jolt works this out inside ApplyBuoyancyImpulse but keeps it, so
                     // getting at it means walking the shape again - hence the opt-in.
                     const JPH::Plane surfacePlane =
                         JPH::Plane::sFromPointAndNormal(ToJolt(surface.m_position), ToJolt(surface.m_normal));
                     float totalVolume = 0.0f;
-                    float submergedVolume = 0.0f;
                     JPH::Vec3 centerOfBuoyancy = JPH::Vec3::sZero();
                     shape->GetSubmergedVolume(
                         body->GetCenterOfMassTransform().ToMat44(), JPH::Vec3::sReplicate(1.0f), surfacePlane, totalVolume,
@@ -804,10 +821,28 @@ namespace JoltBuoyancy
                     submergedFraction = totalVolume > 0.0f ? submergedVolume / totalVolume : 0.0f;
                 }
 
+                if (needsHydrodynamics)
+                {
+                    // Jolt derives the fluid density it uses from the buoyancy factor and
+                    // the body's own mass, so the extra pass has to use the same figure or
+                    // the two halves of the drag would be scaled differently.
+                    const float shapeVolume = shape ? shape->GetVolume() : 0.0f;
+                    const float inverseMass = body->GetMotionProperties()->GetInverseMass();
+                    const float joltFluidDensity =
+                        (shapeVolume > 0.0f && inverseMass > 0.0f) ? buoyancy / (shapeVolume * inverseMass) : 0.0f;
+
+                    const auto previous = previousVelocities.find(bodyEntityId);
+                    ApplyExtraHydrodynamics(
+                        *body, bodyOverride, waterVelocity, joltFluidDensity, settings.m_linearDrag, isotropicScale,
+                        submergedVolume, previous != previousVelocities.end() ? previous->second : AZ::Vector3::CreateZero(),
+                        previous != previousVelocities.end(), inContext.mDeltaTime);
+                }
+
                 if (bodyEntityId.IsValid())
                 {
                     nowSubmerged.emplace(bodyEntityId, submergedFraction);
                     entrySpeeds.emplace(bodyEntityId, approachSpeed);
+                    velocitiesThisStep.emplace(bodyEntityId, FromJolt(body->GetLinearVelocity()));
                 }
             }
         }
@@ -819,6 +854,11 @@ namespace JoltBuoyancy
         AZ_UNUSED(submergedCount);
 
         m_ownedLastStep = AZStd::move(ownedThisStep);
+        m_previousVelocities = AZStd::move(velocitiesThisStep);
+        if (m_previousVelocities.empty())
+        {
+            AZStd::unordered_map<AZ::EntityId, AZ::Vector3>().swap(m_previousVelocities);
+        }
 
         if (!toWake.empty())
         {
@@ -827,6 +867,98 @@ namespace JoltBuoyancy
         }
 
         PublishSubmergedSet(nowSubmerged, entrySpeeds);
+    }
+
+    void JoltWaterVolume::ApplyExtraHydrodynamics(
+        JPH::Body& body,
+        const JoltBuoyancyOverride& bodyOverride,
+        const AZ::Vector3& waterVelocity,
+        float fluidDensity,
+        float baseLinearDrag,
+        float isotropicScale,
+        float submergedVolume,
+        const AZ::Vector3& previousVelocity,
+        bool hadPreviousVelocity,
+        float deltaTime)
+    {
+        JPH::MotionProperties& motion = *body.GetMotionProperties();
+        const float inverseMass = motion.GetInverseMass();
+        if (inverseMass <= 0.0f || submergedVolume <= 0.0f)
+        {
+            return;
+        }
+        const float mass = 1.0f / inverseMass;
+
+        // --- the anisotropic remainder of the drag -------------------------------------
+        //
+        // Jolt was handed the isotropic floor of the per-axis scales, because that is all a
+        // single scalar can carry. Whatever each axis asked for above that floor is applied
+        // here, in the same quadratic, area-projected form Jolt uses, so the two halves are
+        // the same formula rather than two different models fighting.
+        const AZ::Vector3 perAxis = bodyOverride.m_directionalDrag * bodyOverride.m_linearDragMultiplier;
+        const AZ::Vector3 remainder(
+            AZ::GetMax(perAxis.GetX() - isotropicScale, 0.0f),
+            AZ::GetMax(perAxis.GetY() - isotropicScale, 0.0f),
+            AZ::GetMax(perAxis.GetZ() - isotropicScale, 0.0f));
+
+        if (baseLinearDrag > 0.0f && remainder.GetMaxElement() > 0.0f)
+        {
+            const AZ::Vector3 relativeVelocity = waterVelocity - FromJolt(body.GetLinearVelocity());
+            const float relativeSpeed = relativeVelocity.GetLength();
+            if (relativeSpeed > 1.0e-4f)
+            {
+                const JPH::Vec3 localSize = body.GetShape()->GetLocalBounds().GetSize();
+                // Face areas of the local bounding box, per axis.
+                const AZ::Vector3 axisArea(
+                    localSize.GetY() * localSize.GetZ(),
+                    localSize.GetZ() * localSize.GetX(),
+                    localSize.GetX() * localSize.GetY());
+
+                const JPH::Quat rotation = body.GetRotation();
+                const AZ::Vector3 localRelative = FromJolt(rotation.InverseRotate(ToJolt(relativeVelocity)));
+
+                const AZ::Vector3 localImpulse = AZ::Vector3(
+                    0.5f * fluidDensity * baseLinearDrag * remainder.GetX() * axisArea.GetX() * deltaTime *
+                        localRelative.GetX() * relativeSpeed,
+                    0.5f * fluidDensity * baseLinearDrag * remainder.GetY() * axisArea.GetY() * deltaTime *
+                        localRelative.GetY() * relativeSpeed,
+                    0.5f * fluidDensity * baseLinearDrag * remainder.GetZ() * axisArea.GetZ() * deltaTime *
+                        localRelative.GetZ() * relativeSpeed);
+
+                AZ::Vector3 impulse = FromJolt(rotation * ToJolt(localImpulse));
+
+                // Clamped against the velocity it is opposing, exactly as Jolt clamps its
+                // own drag: without it a large step or a steep coefficient reverses the
+                // body instead of slowing it.
+                const AZ::Vector3 deltaVelocity = impulse * inverseMass;
+                const float currentSpeed = FromJolt(body.GetLinearVelocity()).GetLength();
+                if (deltaVelocity.GetLength() > currentSpeed && deltaVelocity.GetLength() > 0.0f)
+                {
+                    impulse *= currentSpeed / deltaVelocity.GetLength();
+                }
+                body.AddImpulse(ToJolt(impulse));
+            }
+        }
+
+        // --- added mass -----------------------------------------------------------------
+        //
+        // Water accelerated along with the hull. Doing this properly means adding to the
+        // solver's mass matrix, which Jolt does not expose, so this resists the change in
+        // velocity after the fact: the body keeps the fraction of its velocity change that
+        // its own inertia accounts for, and loses the fraction the entrained water would
+        // have absorbed. It is an approximation and behaves like one - it damps
+        // acceleration rather than genuinely making the body heavier - but it takes the
+        // twitchiness out of heave and pitch, which is what it is for.
+        if (bodyOverride.m_addedMass > 0.0f && hadPreviousVelocity)
+        {
+            const float addedMass = bodyOverride.m_addedMass * fluidDensity * submergedVolume;
+            if (addedMass > 0.0f)
+            {
+                const float ratio = addedMass / (mass + addedMass);
+                const AZ::Vector3 velocityChange = FromJolt(body.GetLinearVelocity()) - previousVelocity;
+                motion.AddLinearVelocityStep(ToJolt(-ratio * velocityChange));
+            }
+        }
     }
 
     void JoltWaterVolume::PublishSubmergedSet(

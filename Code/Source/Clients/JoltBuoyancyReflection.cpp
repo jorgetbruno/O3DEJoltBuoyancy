@@ -265,6 +265,10 @@ namespace JoltBuoyancy
                 ->Event("GetLinearDragMultiplier", &JoltBuoyancyOverrideRequestBus::Events::GetLinearDragMultiplier)
                 ->Event("SetAngularDragMultiplier", &JoltBuoyancyOverrideRequestBus::Events::SetAngularDragMultiplier)
                 ->Event("GetAngularDragMultiplier", &JoltBuoyancyOverrideRequestBus::Events::GetAngularDragMultiplier)
+                ->Event("SetDirectionalDrag", &JoltBuoyancyOverrideRequestBus::Events::SetDirectionalDrag)
+                ->Event("GetDirectionalDrag", &JoltBuoyancyOverrideRequestBus::Events::GetDirectionalDrag)
+                ->Event("SetAddedMass", &JoltBuoyancyOverrideRequestBus::Events::SetAddedMass)
+                ->Event("GetAddedMass", &JoltBuoyancyOverrideRequestBus::Events::GetAddedMass)
                 ;
         }
     }

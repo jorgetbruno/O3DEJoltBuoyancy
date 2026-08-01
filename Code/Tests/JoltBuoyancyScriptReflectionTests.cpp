@@ -57,7 +57,9 @@ namespace JoltBuoyancy
     TEST_F(JoltBuoyancyScriptReflectionTests, BuoyancyOverrideBusIsReflected)
     {
         ExpectBusHasEvents("JoltBuoyancyOverrideRequestBus",
-            { "SetExcludedFromWater", "IsExcludedFromWater", "SetBuoyancyFactor", "GetBuoyancyFactor" });
+            { "SetExcludedFromWater", "IsExcludedFromWater", "SetBuoyancyFactor", "GetBuoyancyFactor",
+              "SetBuoyancyMode", "GetBuoyancyMode", "SetDirectionalDrag", "GetDirectionalDrag",
+              "SetAddedMass", "GetAddedMass" });
     }
 
     TEST_F(JoltBuoyancyScriptReflectionTests, WaterVolumeNotificationBusCanBeHandledFromScript)

@@ -62,6 +62,10 @@ namespace JoltBuoyancy
         float GetLinearDragMultiplier() const override;
         void SetAngularDragMultiplier(float multiplier) override;
         float GetAngularDragMultiplier() const override;
+        void SetDirectionalDrag(const AZ::Vector3& perAxisScale) override;
+        AZ::Vector3 GetDirectionalDrag() const override;
+        void SetAddedMass(float coefficient) override;
+        float GetAddedMass() const override;
 
     private:
         //! Pushes the current values into the registry water volumes read while stepping.
@@ -71,6 +75,8 @@ namespace JoltBuoyancy
         float m_factor = 1.2f;
         float m_linearDragMultiplier = 1.0f;
         float m_angularDragMultiplier = 1.0f;
+        AZ::Vector3 m_directionalDrag = AZ::Vector3::CreateOne();
+        float m_addedMass = 0.0f;
         bool m_excluded = false;
     };
 } // namespace JoltBuoyancy
