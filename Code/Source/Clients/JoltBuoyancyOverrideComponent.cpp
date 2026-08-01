@@ -16,6 +16,8 @@ namespace JoltBuoyancy
                 ->Field("Mode", &JoltBuoyancyOverrideComponent::m_mode)
                 ->Field("Factor", &JoltBuoyancyOverrideComponent::m_factor)
                 ->Field("Excluded", &JoltBuoyancyOverrideComponent::m_excluded)
+                ->Field("LinearDragMultiplier", &JoltBuoyancyOverrideComponent::m_linearDragMultiplier)
+                ->Field("AngularDragMultiplier", &JoltBuoyancyOverrideComponent::m_angularDragMultiplier)
                 ;
 
             if (AZ::EditContext* editContext = serializeContext->GetEditContext())
@@ -40,6 +42,13 @@ namespace JoltBuoyancy
                         "below 1 sinks.")
                         ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
                         ->Attribute(AZ::Edit::Attributes::Visibility, &JoltBuoyancyOverrideComponent::m_mode)
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltBuoyancyOverrideComponent::m_linearDragMultiplier,
+                        "Linear drag scale", "Scales the water's drag on this body. Below 1 is streamlined, above 1 "
+                        "drags more than its size suggests.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltBuoyancyOverrideComponent::m_angularDragMultiplier,
+                        "Angular drag scale", "Scales how strongly the water damps this body's spin.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
                     ;
             }
         }
@@ -72,6 +81,8 @@ namespace JoltBuoyancy
         JoltBuoyancyOverride override;
         override.m_mode = m_mode;
         override.m_factor = m_factor;
+        override.m_linearDragMultiplier = m_linearDragMultiplier;
+        override.m_angularDragMultiplier = m_angularDragMultiplier;
         override.m_excluded = m_excluded;
         JoltBuoyancyOverrideRegistry::Get().Set(GetEntityId(), override);
     }
@@ -107,5 +118,27 @@ namespace JoltBuoyancy
     float JoltBuoyancyOverrideComponent::GetBuoyancyFactor() const
     {
         return m_factor;
+    }
+
+    void JoltBuoyancyOverrideComponent::SetLinearDragMultiplier(float multiplier)
+    {
+        m_linearDragMultiplier = multiplier;
+        Publish();
+    }
+
+    float JoltBuoyancyOverrideComponent::GetLinearDragMultiplier() const
+    {
+        return m_linearDragMultiplier;
+    }
+
+    void JoltBuoyancyOverrideComponent::SetAngularDragMultiplier(float multiplier)
+    {
+        m_angularDragMultiplier = multiplier;
+        Publish();
+    }
+
+    float JoltBuoyancyOverrideComponent::GetAngularDragMultiplier() const
+    {
+        return m_angularDragMultiplier;
     }
 } // namespace JoltBuoyancy

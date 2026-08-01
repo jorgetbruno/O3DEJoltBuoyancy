@@ -24,6 +24,8 @@ namespace JoltBuoyancy
                 ->Field("Dimensions", &JoltWaterVolumeComponent::m_dimensions)
                 ->Field("Settings", &JoltWaterVolumeComponent::m_settings)
                 ->Field("Visible", &JoltWaterVolumeComponent::m_visible)
+                ->Field("Enabled", &JoltWaterVolumeComponent::m_enabled)
+                ->Field("SceneName", &JoltWaterVolumeComponent::m_sceneName)
                 ;
 
             if (AZ::EditContext* editContext = serializeContext->GetEditContext())
@@ -65,10 +67,27 @@ namespace JoltBuoyancy
 
     void JoltWaterVolumeComponent::Activate()
     {
-        Physics::DefaultWorldBus::BroadcastResult(
-            m_attachedSceneHandle, &Physics::DefaultWorldRequests::GetDefaultSceneHandle);
+        // A named scene when one is authored, the default scene otherwise. Almost every
+        // volume wants the default, but hard-wiring it left no way to put water in a
+        // secondary scene at all.
+        m_attachedSceneHandle = AzPhysics::InvalidSceneHandle;
+        if (!m_sceneName.empty())
+        {
+            if (auto* sceneInterface = AZ::Interface<AzPhysics::SceneInterface>::Get())
+            {
+                m_attachedSceneHandle = sceneInterface->GetSceneHandle(m_sceneName);
+            }
+            AZ_Warning("JoltBuoyancy", m_attachedSceneHandle != AzPhysics::InvalidSceneHandle,
+                "No physics scene named '%s', so this water volume does nothing.", m_sceneName.c_str());
+        }
+        if (m_attachedSceneHandle == AzPhysics::InvalidSceneHandle)
+        {
+            Physics::DefaultWorldBus::BroadcastResult(
+                m_attachedSceneHandle, &Physics::DefaultWorldRequests::GetDefaultSceneHandle);
+        }
 
         m_waterVolume.SetSettings(m_settings);
+        m_waterVolume.SetEnabled(m_enabled);
         RefreshVolume();
         m_waterVolume.Attach(m_attachedSceneHandle);
 
@@ -133,7 +152,7 @@ namespace JoltBuoyancy
         AzFramework::DebugDisplayRequestBus::Bind(debugDisplayBus, AzFramework::g_defaultSceneEntityDebugDisplayId);
         if (auto* debugDisplay = AzFramework::DebugDisplayRequestBus::FindFirstHandler(debugDisplayBus))
         {
-            DrawWaterVolume(*debugDisplay, m_worldTransform, m_dimensions);
+            DrawWaterVolume(*debugDisplay, m_worldTransform, m_dimensions, &m_settings, m_waterVolume.GetElapsedTime());
         }
     }
 
@@ -225,9 +244,62 @@ namespace JoltBuoyancy
         return m_settings.m_waveAmplitude;
     }
 
+    void JoltWaterVolumeComponent::SetWaveLength(float length)
+    {
+        m_settings.m_waveLength = length;
+        m_waterVolume.SetSettings(m_settings);
+    }
+
+    float JoltWaterVolumeComponent::GetWaveLength() const
+    {
+        return m_settings.m_waveLength;
+    }
+
+    void JoltWaterVolumeComponent::SetWaveSpeed(float speed)
+    {
+        m_settings.m_waveSpeed = speed;
+        m_waterVolume.SetSettings(m_settings);
+    }
+
+    float JoltWaterVolumeComponent::GetWaveSpeed() const
+    {
+        return m_settings.m_waveSpeed;
+    }
+
+    void JoltWaterVolumeComponent::SetWaveDirection(const AZ::Vector2& direction)
+    {
+        m_settings.m_waveDirection = direction;
+        m_waterVolume.SetSettings(m_settings);
+    }
+
+    AZ::Vector2 JoltWaterVolumeComponent::GetWaveDirection() const
+    {
+        return m_settings.m_waveDirection;
+    }
+
     float JoltWaterVolumeComponent::GetSubmergedFraction(AZ::EntityId bodyEntityId) const
     {
         return m_waterVolume.GetSubmergedFraction(bodyEntityId);
+    }
+
+    bool JoltWaterVolumeComponent::IsPointUnderwater(const AZ::Vector3& worldPoint) const
+    {
+        return m_waterVolume.IsPointUnderwater(worldPoint);
+    }
+
+    AZ::Vector3 JoltWaterVolumeComponent::GetSurfacePositionAt(const AZ::Vector3& worldPoint) const
+    {
+        return m_waterVolume.EvaluateSurface(worldPoint).m_position;
+    }
+
+    AZ::Vector3 JoltWaterVolumeComponent::GetSurfaceNormalAt(const AZ::Vector3& worldPoint) const
+    {
+        return m_waterVolume.EvaluateSurface(worldPoint).m_normal;
+    }
+
+    float JoltWaterVolumeComponent::GetDepthAt(const AZ::Vector3& worldPoint) const
+    {
+        return m_waterVolume.GetDepthAt(worldPoint);
     }
 
     void JoltWaterVolumeComponent::DispatchWaterEvents()
@@ -250,6 +322,7 @@ namespace JoltBuoyancy
 
     void JoltWaterVolumeComponent::SetEnabled(bool enabled)
     {
+        m_enabled = enabled;
         m_waterVolume.SetEnabled(enabled);
     }
 

@@ -74,7 +74,56 @@ things about it are load-bearing:
 
 The volume's **local +Z face is the water surface**, so a tilted volume gives a tilted
 surface. Settings are snapshotted under a mutex once per step, since gameplay may write
-them while `OnStep` reads.
+them while `OnStep` reads. A volume can be a **box or a sphere**; a sphere is sized by
+its X dimension and its surface sits at the top, like a tank filled to the brim.
+
+### Waves, and arbitrary surfaces
+
+The surface is sampled **per body**, not once for the volume, which is what lets it be a
+wave rather than a plane: two boats on one swell sit at different heights and tilt with
+their own part of it. The wave is evaluated in the volume's local space, so it rides a
+tilted volume rather than ignoring the tilt, and its normal comes from three
+finite-difference taps. The phase advances from the step delta rather than a wall clock,
+so a paused game has a still surface, and it wraps each wave period so a float32 does not
+lose precision over a long session.
+
+`SetSurfaceFunction` replaces the built-in surface entirely, for water that has to line
+up with something the gem knows nothing about. The volume still decides *which* bodies
+are considered, since that comes from its bounds - which are padded upward by the wave
+amplitude so a body riding a crest does not fall out of the query.
+
+### Who owns a body
+
+Overlapping volumes used to both apply an impulse to the same body. Volumes now register
+per physics system, and each works out independently whether it owns a given body: the
+one holding it deepest below its own surface wins. Every volume reaches the same answer
+from the same data, which matters because Jolt runs step listeners on several jobs at
+once - claiming first-come-first-served would depend on job order and vary frame to
+frame. A body whose centre sits in a neighbour is left to that neighbour even when it
+still overlaps this volume's box, which is the straddling case. Ownership sticks unless a
+neighbour holds the body meaningfully deeper (`OwnershipHysteresis`), so a body drifting
+along a seam does not change hands every few steps.
+
+### Sleeping bodies
+
+A sleeping body ignores water: `ApplyBuoyancyImpulse` does not wake anything. `OnStep`
+queues sleepers and `WakePendingBodies` activates them **after** the step, because waking
+takes the body mutex the step is holding. Only bodies in water that has *changed* are
+woken, tracked by a generation counter - waking every sleeper every step would keep every
+floating body permanently awake. A body that falls asleep is still in the water, so it
+stays in the submerged set and keeps being counted.
+
+### Per-body control, and events
+
+A **Jolt Buoyancy Override** component gives one entity an explicit buoyancy factor,
+drag multipliers, or exclusion from water entirely. Explicit factor is the sealed-hull
+case: a boat is mostly air, but its collider volume says otherwise, so the derived
+density sinks it. Overrides go through a registry rather than an EBus, because volumes
+read them from Jolt's job threads where dispatching to gameplay code is off limits.
+
+`JoltWaterVolumeNotificationBus` reports bodies entering and leaving, with the entry
+speed along the surface normal so a handler can tell a splash from a drift. Both are
+raised after the step, never from inside it.
 
 `JoltWaterVolumeComponent` (runtime) and `EditorJoltWaterVolumeComponent` (editor) follow
 the same editor/runtime split as the physics gem, and both draw the volume as a
@@ -82,8 +131,17 @@ translucent box through the shared `DrawWaterVolume` — the visual is driven by
 transform and dimensions the solver uses, so the two cannot drift apart.
 
 `Include/JoltBuoyancy/JoltBuoyancyBus.h` exposes fluid density, linear and angular drag,
-the current, enable/disable, and a submerged-body count for diagnosing a volume that
-appears to be doing nothing.
+the current, dimensions, the whole settings block, every wave parameter, enable/disable,
+a submerged-body count, per-body submerged fraction (opt-in, since Jolt computes it
+internally but does not hand it back), and the gameplay queries `IsPointUnderwater`,
+`GetSurfacePositionAt`, `GetSurfaceNormalAt` and `GetDepthAt`.
+
+Everything is reflected to the **BehaviorContext**, so Lua and Script Canvas can change
+water and hear about splashes. `JoltBuoyancyScriptReflectionTests` pins that, the way the
+physics gem pins its own gameplay buses.
+
+A volume attaches to the default scene unless a scene name is authored, and its enabled
+state is serialized, so a level can hold water that starts switched off.
 
 ## Building and testing
 
@@ -96,17 +154,26 @@ cmd /c "C:\Users\jorge\O3DE\Projects\JoltPhysicsTest\build-env.cmd cmake --build
 
 ```
 cd build\windows\bin\profile
-.\AzTestRunner.exe JoltBuoyancy.Tests.dll AzRunUnitTests    # 8 tests
+.\AzTestRunner.exe JoltBuoyancy.Tests.dll AzRunUnitTests    # 39 tests
 ```
 
 Check the process exit code, not the console text.
 
 `Code/Tests/JoltWaterVolumeTests.cpp` builds a **plain Jolt world** rather than using the
 physics gem's scene, so the gem is testable on its own — which also proves the API
-dependency is all it needs. The eight: a light body floats, a dense one sinks, a denser
-fluid floats a body that would otherwise sink, a body outside the volume falls freely,
-disabling stops the effect and re-enabling resumes it, a current carries a body along,
-and attaching to nothing fails.
+dependency is all it needs. It covers flotation by density, tilted volumes, compound
+shapes, sphere volumes, waves and custom surfaces, per-body overrides and drag
+multipliers, enter/exit events, submerged fraction, sleeping bodies waking and staying
+counted, and the overlap cases including a body straddling two adjacent volumes.
+
+`JoltWaterVolumeComponentTests.cpp` covers the layer above: a setter that updated only
+the component's own copy and never reached the volume would pass every physics test and
+still do nothing in a level. `JoltBuoyancyScriptReflectionTests.cpp` pins the script
+surface.
+
+One gap worth naming: the **collision-group filter** cannot be exercised here, because
+resolving a group to a mask needs the physics gem's bus, which the standalone Jolt world
+has no handler for.
 
 ## Test level
 
@@ -125,10 +192,15 @@ would end up exactly where it does. Bodies are 1 m³ boxes, so mass *is* density
 
 ## Known limitations
 
-- **Boxes only.** The volume is an oriented box; sphere and mesh water, and a real
-  surface from Atom's water rendering, are unimplemented.
-- **Overlapping volumes both apply impulses to the same body** — "double buoyancy". Not
-  guarded against.
+- **Boxes and spheres only.** Mesh-shaped water is unimplemented: a volume is a
+  containment test plus a surface function, not a Jolt body, so an arbitrary mesh would
+  need point-in-mesh queries this gem does not have. A real rendered surface from Atom's
+  water rendering is also unimplemented — the drawing here is debug geometry.
+- **Ownership between overlapping volumes is a hard switch** once the hysteresis margin
+  is crossed. A body crossing from a river into a pool changes current and density in one
+  step rather than blending across the boundary.
+- **One wave train.** The built-in surface is a single sine; anything richer needs
+  `SetSurfaceFunction`.
 - **Buoyancy applies to dynamic bodies only**, by design (a static body in water is a
   pier, not a boat).
 
@@ -150,10 +222,15 @@ would end up exactly where it does. Bodies are 1 m³ boxes, so mass *is* density
 tests predict — this is the confirmation the notes this file replaced were still waiting
 on, and it closes the last gap between "the maths is right" and "the feature works".
 
-**Also verified:** the gem and its editor module build; 8/8 unit tests pass against a
+**Also verified:** the gem and its editor module build; 39/39 unit tests pass against a
 real Jolt world; the level prefab is valid with the right editor components and masses;
 the game launcher loads the level and simulates it for 30 s with no crash, exercising
 the `Activate` → `AddStepListener` path that used to crash.
+
+**Not observed in the editor:** the box component mode's drag handles, the edit-mode
+preview (water simulating in the Edit viewport), the tessellated wave surface, and the
+sea and hull lanes added to the test level. Those build and are covered by unit tests
+wherever a unit test can reach them, but none has been looked at.
 
 ## License
 

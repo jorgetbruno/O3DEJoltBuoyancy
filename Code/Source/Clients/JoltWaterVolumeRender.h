@@ -15,6 +15,12 @@ namespace JoltBuoyancy
     //! Shared by the editor component (viewport) and the runtime component (game mode)
     //! so the two cannot drift apart, and driven by the same world transform and
     //! dimensions the solver uses - the visual is the volume, not a copy of it.
+    //! Pass the settings and the volume's wave phase to draw the surface as it actually
+    //! is. Without them the lid is drawn flat, which is a lie whenever waves are on.
     void DrawWaterVolume(
-        AzFramework::DebugDisplayRequests& debugDisplay, const AZ::Transform& worldTransform, const AZ::Vector3& dimensions);
+        AzFramework::DebugDisplayRequests& debugDisplay,
+        const AZ::Transform& worldTransform,
+        const AZ::Vector3& dimensions,
+        const JoltWaterVolumeSettings* settings = nullptr,
+        float elapsedTime = 0.0f);
 } // namespace JoltBuoyancy

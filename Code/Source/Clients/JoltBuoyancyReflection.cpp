@@ -50,6 +50,8 @@ namespace JoltBuoyancy
                 ->Field("WaveDirection", &JoltWaterVolumeSettings::m_waveDirection)
                 ->Field("CollisionGroupId", &JoltWaterVolumeSettings::m_collisionGroupId)
                 ->Field("ReportSubmergedFraction", &JoltWaterVolumeSettings::m_reportSubmergedFraction)
+                ->Field("Shape", &JoltWaterVolumeSettings::m_shape)
+                ->Field("OwnershipHysteresis", &JoltWaterVolumeSettings::m_ownershipHysteresis)
                 ;
 
             if (AZ::EditContext* editContext = serializeContext->GetEditContext())
@@ -57,6 +59,11 @@ namespace JoltBuoyancy
                 editContext->Class<JoltWaterVolumeSettings>("Water Settings", "")
                     ->ClassElement(AZ::Edit::ClassElements::EditorData, "")
                         ->Attribute(AZ::Edit::Attributes::AutoExpand, true)
+                    ->DataElement(AZ::Edit::UIHandlers::ComboBox, &JoltWaterVolumeSettings::m_shape,
+                        "Shape", "The region the water fills. A sphere is sized by its X dimension and its surface "
+                        "sits at the top of the sphere.")
+                        ->EnumAttribute(JoltWaterVolumeShape::Box, "Box")
+                        ->EnumAttribute(JoltWaterVolumeShape::Sphere, "Sphere")
                     ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_fluidDensity,
                         "Fluid density", "Density of the fluid. A body floats when it is less dense than this and "
                         "sinks when it is denser. Fresh water is 1000.")
@@ -96,6 +103,11 @@ namespace JoltBuoyancy
                     ->DataElement(AZ::Edit::UIHandlers::CheckBox, &JoltWaterVolumeSettings::m_reportSubmergedFraction,
                         "Report submerged fraction", "Work out how much of each body is under the surface and publish "
                         "it on the bus. Costs an extra pass over each body's shape, so it is off by default.")
+                    ->DataElement(AZ::Edit::UIHandlers::Default, &JoltWaterVolumeSettings::m_ownershipHysteresis,
+                        "Ownership hysteresis", "How much deeper an overlapping volume must hold a body before it "
+                        "takes it over. Stops a body on the seam between two volumes changing hands repeatedly.")
+                        ->Attribute(AZ::Edit::Attributes::Min, 0.0f)
+                        ->Attribute(AZ::Edit::Attributes::Suffix, " m")
                     ;
             }
         }
@@ -121,6 +133,8 @@ namespace JoltBuoyancy
             // what SetBuoyancyMode expects.
             behaviorContext->Enum<static_cast<int>(JoltBuoyancyMode::Automatic)>("JoltBuoyancyMode_Automatic");
             behaviorContext->Enum<static_cast<int>(JoltBuoyancyMode::Explicit)>("JoltBuoyancyMode_Explicit");
+            behaviorContext->Enum<static_cast<int>(JoltWaterVolumeShape::Box)>("JoltWaterVolumeShape_Box");
+            behaviorContext->Enum<static_cast<int>(JoltWaterVolumeShape::Sphere)>("JoltWaterVolumeShape_Sphere");
 
             behaviorContext->EBus<JoltWaterVolumeRequestBus>("JoltWaterVolumeRequestBus")
                 ->Attribute(AZ::Script::Attributes::Category, "Jolt Physics")
@@ -142,10 +156,20 @@ namespace JoltBuoyancy
                 ->Event("GetWavesEnabled", &JoltWaterVolumeRequestBus::Events::GetWavesEnabled)
                 ->Event("SetWaveAmplitude", &JoltWaterVolumeRequestBus::Events::SetWaveAmplitude)
                 ->Event("GetWaveAmplitude", &JoltWaterVolumeRequestBus::Events::GetWaveAmplitude)
+                ->Event("SetWaveLength", &JoltWaterVolumeRequestBus::Events::SetWaveLength)
+                ->Event("GetWaveLength", &JoltWaterVolumeRequestBus::Events::GetWaveLength)
+                ->Event("SetWaveSpeed", &JoltWaterVolumeRequestBus::Events::SetWaveSpeed)
+                ->Event("GetWaveSpeed", &JoltWaterVolumeRequestBus::Events::GetWaveSpeed)
+                ->Event("SetWaveDirection", &JoltWaterVolumeRequestBus::Events::SetWaveDirection)
+                ->Event("GetWaveDirection", &JoltWaterVolumeRequestBus::Events::GetWaveDirection)
                 ->Event("SetEnabled", &JoltWaterVolumeRequestBus::Events::SetEnabled)
                 ->Event("IsEnabled", &JoltWaterVolumeRequestBus::Events::IsEnabled)
                 ->Event("GetSubmergedBodyCount", &JoltWaterVolumeRequestBus::Events::GetSubmergedBodyCount)
                 ->Event("GetSubmergedFraction", &JoltWaterVolumeRequestBus::Events::GetSubmergedFraction)
+                ->Event("IsPointUnderwater", &JoltWaterVolumeRequestBus::Events::IsPointUnderwater)
+                ->Event("GetSurfacePositionAt", &JoltWaterVolumeRequestBus::Events::GetSurfacePositionAt)
+                ->Event("GetSurfaceNormalAt", &JoltWaterVolumeRequestBus::Events::GetSurfaceNormalAt)
+                ->Event("GetDepthAt", &JoltWaterVolumeRequestBus::Events::GetDepthAt)
                 ;
 
             behaviorContext->EBus<JoltWaterVolumeNotificationBus>("JoltWaterVolumeNotificationBus")
@@ -163,6 +187,12 @@ namespace JoltBuoyancy
                 ->Event("IsExcludedFromWater", &JoltBuoyancyOverrideRequestBus::Events::IsExcludedFromWater)
                 ->Event("SetBuoyancyFactor", &JoltBuoyancyOverrideRequestBus::Events::SetBuoyancyFactor)
                 ->Event("GetBuoyancyFactor", &JoltBuoyancyOverrideRequestBus::Events::GetBuoyancyFactor)
+                ->Event("SetBuoyancyMode", &JoltBuoyancyOverrideRequestBus::Events::SetBuoyancyMode)
+                ->Event("GetBuoyancyMode", &JoltBuoyancyOverrideRequestBus::Events::GetBuoyancyMode)
+                ->Event("SetLinearDragMultiplier", &JoltBuoyancyOverrideRequestBus::Events::SetLinearDragMultiplier)
+                ->Event("GetLinearDragMultiplier", &JoltBuoyancyOverrideRequestBus::Events::GetLinearDragMultiplier)
+                ->Event("SetAngularDragMultiplier", &JoltBuoyancyOverrideRequestBus::Events::SetAngularDragMultiplier)
+                ->Event("GetAngularDragMultiplier", &JoltBuoyancyOverrideRequestBus::Events::GetAngularDragMultiplier)
                 ;
         }
     }

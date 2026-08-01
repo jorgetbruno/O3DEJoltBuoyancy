@@ -703,6 +703,185 @@ namespace JoltBuoyancy
         EXPECT_LT(restingZ, 0.8f);
     }
 
+    TEST_F(JoltWaterVolumeTests, AStraddlingBodyIsOnlyClaimedByTheVolumeHoldingIt)
+    {
+        // The hole the first overlap fix left. Arbitration only ran when a volume contained
+        // the body's centre, so for a body sitting in A while still overlapping B's query
+        // box, A applied and B never arbitrated at all. Jolt measures the whole shape
+        // against each surface, so the straddler took roughly double the impulse.
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        m_waterVolume.SetSettings(settings);
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(-5.0f, 0.0f, -2.5f)), AZ::Vector3(10.0f, 10.0f, 5.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        // Sits edge to edge with the first, so their boxes meet at x = 0.
+        JoltWaterVolume neighbour;
+        neighbour.SetSettings(settings);
+        neighbour.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(5.0f, 0.0f, -2.5f)), AZ::Vector3(10.0f, 10.0f, 5.0f));
+        ASSERT_TRUE(neighbour.AttachToPhysicsSystem(m_physicsSystem.get()));
+        m_extraVolumes.push_back(&neighbour);
+
+        // Denser than the fluid, so one impulse leaves it sinking and two float it.
+        // Placed just inside the first volume but close enough to the seam that its shape
+        // still overlaps the second's box.
+        CreateFloor(-4.0f);
+        auto cube = CreateCubeAt(1500.0f, AZ::Vector3(-0.2f, 0.0f, -0.5f));
+
+        Simulate(0.5f);
+        const int claimed = m_waterVolume.GetSubmergedBodyCount() + neighbour.GetSubmergedBodyCount();
+        EXPECT_EQ(claimed, 1) << "the straddling body should be claimed once, not by both volumes";
+
+        Simulate(4.0f);
+        EXPECT_LT(GetBodyPosition(cube).GetZ(), -3.0f) << "it should still sink, not be floated by a doubled impulse";
+
+        neighbour.Detach();
+        m_extraVolumes.clear();
+    }
+
+    TEST_F(JoltWaterVolumeTests, DisablingClearsTheSubmergedStateAndRaisesExits)
+    {
+        // A floor inside the water and a dense body, so it is reliably still submerged and
+        // awake when the state is sampled rather than bobbing through the surface.
+        CreateFloor(-4.0f);
+        CreateWater();
+        const AZ::EntityId floater(0xD15AB1u);
+        auto cube = CreateCube(1500.0f, -1.0f);
+        SetBodyEntityId(cube, floater);
+
+        AZStd::vector<JoltWaterVolumeEvent> events;
+        Simulate(0.5f);
+        m_waterVolume.TakePendingEvents(events);
+        ASSERT_FALSE(events.empty());
+        ASSERT_TRUE(events[0].m_entered);
+        ASSERT_GT(m_waterVolume.GetSubmergedBodyCount(), 0);
+
+        // Switching off used to skip publishing entirely, so the fraction and the
+        // submerged set kept their pre-disable values and the exit was not noticed until
+        // the volume was switched back on.
+        m_waterVolume.SetEnabled(false);
+        Simulate(0.2f);
+
+        m_waterVolume.TakePendingEvents(events);
+        ASSERT_EQ(events.size(), 1u);
+        EXPECT_FALSE(events[0].m_entered);
+        EXPECT_EQ(events[0].m_bodyEntityId, floater);
+        EXPECT_EQ(m_waterVolume.GetSubmergedBodyCount(), 0);
+        EXPECT_FLOAT_EQ(m_waterVolume.GetSubmergedFraction(floater), 0.0f);
+    }
+
+    TEST_F(JoltWaterVolumeTests, SettledSleepingBodiesAreStillCounted)
+    {
+        // A pool of floaters that have settled and gone to sleep used to report zero, which
+        // is exactly what a volume that had stopped working reports - so the counter was
+        // useless for the one thing it exists to diagnose.
+        CreateFloor();
+        CreateWater();
+        auto cube = CreateCube(200.0f, -1.0f);
+        SetBodyEntityId(cube, AZ::EntityId(0x51EEDu));
+
+        Simulate(8.0f);
+
+        ASSERT_TRUE(IsBodyAsleep(cube)) << "the test needs it to have settled";
+        EXPECT_GT(m_waterVolume.GetSubmergedBodyCount(), 0);
+    }
+
+    TEST_F(JoltWaterVolumeTests, SphereVolumeContainsAndFloats)
+    {
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        settings.m_shape = JoltWaterVolumeShape::Sphere;
+        m_waterVolume.SetSettings(settings);
+        // A 10 m sphere centred at the origin: its surface sits at z = +5.
+        m_waterVolume.SetVolume(AZ::Transform::CreateIdentity(), AZ::Vector3(10.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        const JoltWaterVolumeSnapshot snapshot = m_waterVolume.GetSnapshot();
+        EXPECT_TRUE(snapshot.Contains(AZ::Vector3(0.0f, 0.0f, 0.0f)));
+        EXPECT_TRUE(snapshot.Contains(AZ::Vector3(4.9f, 0.0f, 0.0f)));
+        // Inside the bounding box but outside the sphere, which a box volume would accept.
+        EXPECT_FALSE(snapshot.Contains(AZ::Vector3(4.0f, 4.0f, 0.0f)));
+
+        auto cube = CreateCube(200.0f, -3.0f);
+        Simulate(5.0f);
+        EXPECT_GT(GetBodyZ(cube), 4.0f) << "a light body should rise to the top of the sphere";
+    }
+
+    TEST_F(JoltWaterVolumeTests, WaterQueriesAnswerForGameplay)
+    {
+        CreateWater(); // z from -5 to 0, surface at z = 0
+
+        EXPECT_TRUE(m_waterVolume.IsPointUnderwater(AZ::Vector3(0.0f, 0.0f, -2.0f)));
+        EXPECT_FALSE(m_waterVolume.IsPointUnderwater(AZ::Vector3(0.0f, 0.0f, 1.0f))) << "above the surface";
+        EXPECT_FALSE(m_waterVolume.IsPointUnderwater(AZ::Vector3(100.0f, 0.0f, -2.0f))) << "outside the volume";
+
+        EXPECT_NEAR(m_waterVolume.GetDepthAt(AZ::Vector3(0.0f, 0.0f, -2.0f)), 2.0f, 0.001f);
+        EXPECT_LT(m_waterVolume.GetDepthAt(AZ::Vector3(0.0f, 0.0f, 1.0f)), 0.0f);
+        EXPECT_NEAR(m_waterVolume.EvaluateSurface(AZ::Vector3(3.0f, 0.0f, -2.0f)).m_position.GetZ(), 0.0f, 0.001f);
+    }
+
+    TEST_F(JoltWaterVolumeTests, WaveCrestsStayInsideTheQueryBounds)
+    {
+        // The wave lifts the surface above the volume's own lid, but the broadphase query
+        // decides which bodies are looked at. Unpadded, a body riding a crest leaves the
+        // query, stops being affected, falls back in and oscillates.
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        settings.m_wavesEnabled = true;
+        settings.m_waveAmplitude = 1.5f;
+        settings.m_waveLength = 8.0f;
+        settings.m_waveSpeed = 0.0f; // frozen, so the crest stays where it is
+        m_waterVolume.SetSettings(settings);
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), AZ::Vector3(50.0f, 50.0f, 5.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        // The unpadded lid is z = 0; with amplitude 1.5 the bounds must reach past it.
+        const JoltWaterVolumeSnapshot snapshot = m_waterVolume.GetSnapshot();
+        EXPECT_GT(snapshot.m_worldBounds.GetMax().GetZ(), 1.0f);
+
+        // And a body actually rides the crest rather than falling out of the query at the
+        // old lid height.
+        auto cube = CreateCubeAt(200.0f, AZ::Vector3(2.0f, 0.0f, -3.0f)); // x = 2 is a crest
+        Simulate(6.0f);
+        EXPECT_GT(GetBodyPosition(cube).GetZ(), 0.2f) << "it should settle on the crest, above the flat lid";
+    }
+
+    TEST_F(JoltWaterVolumeTests, DragMultiplierChangesHowFastABodyIsSlowed)
+    {
+        JoltWaterVolumeSettings settings;
+        settings.m_fluidDensity = 1000.0f;
+        settings.m_linearDrag = 4.0f; // thick water, so the multiplier has something to scale
+        m_waterVolume.SetSettings(settings);
+        m_waterVolume.SetVolume(
+            AZ::Transform::CreateTranslation(AZ::Vector3(0.0f, 0.0f, -2.5f)), AZ::Vector3(200.0f, 50.0f, 5.0f));
+        ASSERT_TRUE(m_waterVolume.AttachToPhysicsSystem(m_physicsSystem.get()));
+
+        const AZ::EntityId streamlined(0x51EEC);
+        auto draggy = CreateCubeAt(900.0f, AZ::Vector3(0.0f, -5.0f, -2.0f));
+        auto sleek = CreateCubeAt(900.0f, AZ::Vector3(0.0f, 5.0f, -2.0f));
+        SetBodyEntityId(sleek, streamlined);
+
+        JoltBuoyancyOverride sleekOverride;
+        sleekOverride.m_linearDragMultiplier = 0.05f;
+        JoltBuoyancyOverrideRegistry::Get().Set(streamlined, sleekOverride);
+
+        // Same shove to both.
+        const JPH::Vec3 push(12.0f, 0.0f, 0.0f);
+        m_physicsSystem->GetBodyInterface().SetLinearVelocity(draggy, push);
+        m_physicsSystem->GetBodyInterface().SetLinearVelocity(sleek, push);
+
+        Simulate(1.5f);
+
+        // The streamlined one keeps more of its shove, which buoyancy factor and exclusion
+        // together could not express.
+        EXPECT_GT(GetBodyPosition(sleek).GetX(), GetBodyPosition(draggy).GetX() + 1.0f);
+
+        JoltBuoyancyOverrideRegistry::Get().Remove(streamlined);
+    }
+
     TEST_F(JoltWaterVolumeTests, AttachingToNothingFails)
     {
         EXPECT_FALSE(m_waterVolume.AttachToPhysicsSystem(nullptr));

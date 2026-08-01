@@ -13,6 +13,9 @@ namespace JoltBuoyancy
     {
         JoltBuoyancyMode m_mode = JoltBuoyancyMode::Automatic;
         float m_factor = 1.0f;
+        //! Scale the volume's drag for this body. 1 leaves it alone.
+        float m_linearDragMultiplier = 1.0f;
+        float m_angularDragMultiplier = 1.0f;
         bool m_excluded = false;
     };
 

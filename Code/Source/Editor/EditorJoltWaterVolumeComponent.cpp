@@ -176,7 +176,7 @@ namespace JoltBuoyancy
         AZ::Transform worldTransform = AZ::Transform::CreateIdentity();
         AZ::TransformBus::EventResult(worldTransform, GetEntityId(), &AZ::TransformBus::Events::GetWorldTM);
 
-        DrawWaterVolume(debugDisplay, worldTransform, m_dimensions);
+        DrawWaterVolume(debugDisplay, worldTransform, m_dimensions, &m_settings, m_previewVolume.GetElapsedTime());
     }
 
 } // namespace JoltBuoyancy

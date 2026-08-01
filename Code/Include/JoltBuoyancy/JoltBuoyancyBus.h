@@ -23,6 +23,16 @@ namespace JoltBuoyancy
         Explicit = 1,
     };
 
+    //! The region a volume fills.
+    enum class JoltWaterVolumeShape : AZ::u8
+    {
+        //! An oriented box. Its local +Z face is the surface.
+        Box = 0,
+        //! A sphere, sized by the X dimension. Its surface plane sits at the top of the
+        //! sphere, so it reads as a tank filled to the brim.
+        Sphere = 1,
+    };
+
     //! Settings describing a body of water.
     struct JoltWaterVolumeSettings
     {
@@ -30,6 +40,9 @@ namespace JoltBuoyancy
         AZ_TYPE_INFO(JoltWaterVolumeSettings, "{E5F6A7B8-C9D0-4B4C-DE5F-6A7B8C9D0E1F}");
 
         static void Reflect(AZ::ReflectContext* context);
+
+        //! Which region the water fills.
+        JoltWaterVolumeShape m_shape = JoltWaterVolumeShape::Box;
 
         //! kg/m^3. A body floats when its own density is below this and sinks above it.
         float m_fluidDensity = 1000.0f;
@@ -59,6 +72,11 @@ namespace JoltBuoyancy
         //! ApplyBuoyancyImpulse but does not hand it back, so asking for it means walking
         //! the shape a second time.
         bool m_reportSubmergedFraction = false;
+
+        //! How much deeper a neighbouring volume has to hold a body before it takes it
+        //! over. Without it, a body drifting along the seam between two volumes flips
+        //! owner every few steps and its current and density change abruptly each time.
+        float m_ownershipHysteresis = 0.1f;
     };
 
     //! Runtime control of a water volume. The volume applies Jolt's buoyancy impulses to
@@ -95,22 +113,47 @@ namespace JoltBuoyancy
         virtual void SetWaterSettings(const JoltWaterVolumeSettings& settings) = 0;
         virtual JoltWaterVolumeSettings GetWaterSettings() const = 0;
 
-        //! Surface waves. Amplitude and length are in metres, speed in metres per second.
+        //! Surface waves. Amplitude and length are in metres, speed in metres per second,
+        //! direction is in the volume's local XY plane.
         virtual void SetWavesEnabled(bool enabled) = 0;
         virtual bool GetWavesEnabled() const = 0;
         virtual void SetWaveAmplitude(float amplitude) = 0;
         virtual float GetWaveAmplitude() const = 0;
+        virtual void SetWaveLength(float length) = 0;
+        virtual float GetWaveLength() const = 0;
+        virtual void SetWaveSpeed(float speed) = 0;
+        virtual float GetWaveSpeed() const = 0;
+        virtual void SetWaveDirection(const AZ::Vector2& direction) = 0;
+        virtual AZ::Vector2 GetWaveDirection() const = 0;
 
         //! Stops or resumes applying buoyancy without removing the component.
         virtual void SetEnabled(bool enabled) = 0;
         virtual bool IsEnabled() const = 0;
 
         //! Number of bodies the volume affected during the most recent physics step.
+        //! Bodies that have settled and gone to sleep are still counted: they are still in
+        //! the water, and a pool of sleeping floaters reporting zero would look exactly
+        //! like a volume that had stopped working.
         virtual int GetSubmergedBodyCount() const = 0;
 
         //! How much of the given body was under the surface last step, from 0 to 1.
         //! Returns 0 unless the volume's ReportSubmergedFraction setting is on.
         virtual float GetSubmergedFraction(AZ::EntityId bodyEntityId) const = 0;
+
+        //! Whether a world point is inside this volume and below its surface. The first
+        //! thing gameplay wants: whether to play a bubble effect, drown a character, cut
+        //! the engine on a boat.
+        virtual bool IsPointUnderwater(const AZ::Vector3& worldPoint) const = 0;
+
+        //! Where the surface sits directly above a world point, and which way it faces.
+        //! Follows the waves, so this is what to place a splash or a floating decal on.
+        //! Meaningless if the point is outside the volume - check IsPointUnderwater first.
+        virtual AZ::Vector3 GetSurfacePositionAt(const AZ::Vector3& worldPoint) const = 0;
+        virtual AZ::Vector3 GetSurfaceNormalAt(const AZ::Vector3& worldPoint) const = 0;
+
+        //! How deep a world point sits below the surface, along the surface normal.
+        //! Negative above it.
+        virtual float GetDepthAt(const AZ::Vector3& worldPoint) const = 0;
     };
 
     using JoltWaterVolumeRequestBus = AZ::EBus<JoltWaterVolumeRequests>;
@@ -163,6 +206,14 @@ namespace JoltBuoyancy
         //! floats half out of the water, above 1 rides higher, below 1 sinks.
         virtual void SetBuoyancyFactor(float factor) = 0;
         virtual float GetBuoyancyFactor() const = 0;
+
+        //! Scales the volume's drag for this body alone. A streamlined hull cuts through
+        //! water its own weight would otherwise be slowed by, which buoyancy factor and
+        //! exclusion together cannot express.
+        virtual void SetLinearDragMultiplier(float multiplier) = 0;
+        virtual float GetLinearDragMultiplier() const = 0;
+        virtual void SetAngularDragMultiplier(float multiplier) = 0;
+        virtual float GetAngularDragMultiplier() const = 0;
     };
 
     using JoltBuoyancyOverrideRequestBus = AZ::EBus<JoltBuoyancyOverrideRequests>;

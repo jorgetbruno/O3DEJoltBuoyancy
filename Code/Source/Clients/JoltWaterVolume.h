@@ -12,6 +12,7 @@
 
 #include <AzCore/Component/EntityId.h>
 #include <AzCore/std/containers/unordered_map.h>
+#include <AzCore/std/containers/unordered_set.h>
 #include <AzCore/std/functional.h>
 
 #include <AzFramework/Physics/Common/PhysicsTypes.h>
@@ -57,7 +58,9 @@ namespace JoltBuoyancy
         //! Identity only, for breaking ties between volumes with equal submersion depth.
         const void* m_owner = nullptr;
 
-        //! Whether a world-space point lies inside the oriented box.
+        JoltWaterVolumeShape m_shape = JoltWaterVolumeShape::Box;
+
+        //! Whether a world-space point lies inside the volume's region.
         bool Contains(const AZ::Vector3& worldPoint) const;
 
         //! How far the point sits below this volume's surface plane, along the surface
@@ -152,6 +155,28 @@ namespace JoltBuoyancy
         //! ReportSubmergedFraction setting is on.
         float GetSubmergedFraction(AZ::EntityId bodyEntityId) const;
 
+        //! Inside the volume and below its surface.
+        bool IsPointUnderwater(const AZ::Vector3& worldPoint) const;
+
+        //! How far below the surface a point sits, along the surface normal.
+        float GetDepthAt(const AZ::Vector3& worldPoint) const;
+
+        //! The wave phase the volume has reached, in seconds of simulated time. Wrapped to
+        //! one wave period, so it stays precise however long the level runs.
+        float GetElapsedTime() const
+        {
+            return m_elapsedTime.load(AZStd::memory_order_relaxed);
+        }
+
+        //! Whether the wave settings actually produce a moving surface. The renderer uses
+        //! this to decide between a flat lid and a tessellated one.
+        static bool HasWaves(const JoltWaterVolumeSettings& settings);
+
+        //! Height of the surface above a point in the volume's own space, which is what the
+        //! renderer tessellates to draw a rippled surface instead of a flat lid.
+        static float LocalSurfaceHeight(
+            const JoltWaterVolumeSettings& settings, float elapsedTime, float localX, float localY, float halfHeight);
+
         //! Hands over the enter and exit events the last step produced, leaving the queue
         //! empty. Called after the step, for the same reason as WakePendingBodies: a
         //! handler is gameplay code and must not run on a physics job with the body
@@ -173,6 +198,15 @@ namespace JoltBuoyancy
         //! Bumped whenever the water itself changes, so OnStep can tell "the body settled
         //! in water that has not moved since" from "the water just changed under it".
         void BumpGeneration();
+
+        //! Recomputes the world bounds the broadphase is queried with. Assumes the caller
+        //! holds m_settingsMutex.
+        void RebuildBoundsUnlocked();
+
+        //! Whether a body on this object layer is visible to a query using this mask.
+        //! Cached for the life of the volume, so the physics bus is only asked the first
+        //! time a layer is seen rather than on every step from a job thread.
+        bool ObjectLayerPassesFilter(AZ::u32 objectLayer, AZ::u64 collidesWithMask) const;
 
         //! Swaps in this step's submerged set, queueing an enter or exit for every body
         //! that joined or left it.
@@ -214,6 +248,18 @@ namespace JoltBuoyancy
         //! The collision group mask resolved from the settings' group id, cached because
         //! resolving it means a bus call that must not happen on a physics job.
         AZStd::atomic<AZ::u64> m_collidesWithMask{ ~0ull };
+
+        //! Which object layers pass the mask, remembered across steps. Object layers are
+        //! only assigned as bodies are created and never change meaning, so this is filled
+        //! in once per layer and read forever after - which keeps the answer off the
+        //! physics jobs entirely rather than merely once per step.
+        mutable AZStd::mutex m_layerFilterCacheMutex;
+        mutable AZStd::unordered_map<AZ::u64, bool> m_layerFilterCache;
+
+        //! Bodies this volume owned last step. Ownership sticks unless a neighbour holds
+        //! the body meaningfully deeper, so a body on the seam between two volumes does not
+        //! flip owner every few steps.
+        AZStd::unordered_set<AZ::EntityId> m_ownedLastStep;
 
         //! Who was submerged, and by how much, as of the last step. Compared against the
         //! next step's set to raise enter and exit events.

@@ -1,7 +1,10 @@
 #include <Clients/JoltWaterVolumeRender.h>
 
 #include <AzCore/Math/Color.h>
+#include <AzCore/Math/MathUtils.h>
 #include <AzFramework/Entity/EntityDebugDisplayBus.h>
+
+#include <Clients/JoltWaterVolume.h>
 
 namespace JoltBuoyancy
 {
@@ -23,9 +26,15 @@ namespace JoltBuoyancy
     }
 
     void DrawWaterVolume(
-        AzFramework::DebugDisplayRequests& debugDisplay, const AZ::Transform& worldTransform, const AZ::Vector3& dimensions)
+        AzFramework::DebugDisplayRequests& debugDisplay,
+        const AZ::Transform& worldTransform,
+        const AZ::Vector3& dimensions,
+        const JoltWaterVolumeSettings* settings,
+        float elapsedTime)
     {
         const AZ::Vector3 halfExtents = dimensions * 0.5f;
+        const bool isSphere = settings && settings->m_shape == JoltWaterVolumeShape::Sphere;
+        const bool waves = settings && JoltWaterVolume::HasWaves(*settings);
 
         // Drawing in the volume's own space, so a tilted volume tilts with it and the
         // surface stays the local +Z face - the same face the solver treats as the
@@ -39,20 +48,67 @@ namespace JoltBuoyancy
         debugDisplay.CullOff();
 
         debugDisplay.SetColor(BodyColor);
-        debugDisplay.DrawSolidBox(-halfExtents, halfExtents);
+        if (isSphere)
+        {
+            debugDisplay.DrawBall(AZ::Vector3::CreateZero(), dimensions.GetX() * 0.5f);
+        }
+        else
+        {
+            debugDisplay.DrawSolidBox(-halfExtents, halfExtents);
+        }
 
-        // The surface again on its own, brighter: it is the one face with physical
-        // meaning, and a plain box gives no clue which way up it is.
+        // The surface on its own, brighter: it is the one face with physical meaning, and
+        // a plain box gives no clue which way up it is.
         debugDisplay.SetColor(SurfaceColor);
-        debugDisplay.DrawQuad(
-            Corner(halfExtents, false, false, true), Corner(halfExtents, true, false, true),
-            Corner(halfExtents, true, true, true), Corner(halfExtents, false, true, true));
+        const float surfaceHeight = isSphere ? dimensions.GetX() * 0.5f : halfExtents.GetZ();
+
+        if (waves && !isSphere)
+        {
+            // Tessellated, so the drawing shows the surface the solver is actually using.
+            // A flat lid over a rippled surface is the sort of mismatch that sends someone
+            // hunting for a physics bug that is not there.
+            const AZ::Vector2 extents(dimensions.GetX(), dimensions.GetY());
+            const int steps = AZ::GetClamp(static_cast<int>(extents.GetX() / (settings->m_waveLength * 0.2f)), 8, 48);
+
+            const auto surfacePoint = [&](int ix, int iy)
+            {
+                const float x = -halfExtents.GetX() + extents.GetX() * (static_cast<float>(ix) / steps);
+                const float y = -halfExtents.GetY() + extents.GetY() * (static_cast<float>(iy) / steps);
+                return AZ::Vector3(
+                    x, y, JoltWaterVolume::LocalSurfaceHeight(*settings, elapsedTime, x, y, surfaceHeight));
+            };
+
+            for (int ix = 0; ix < steps; ++ix)
+            {
+                for (int iy = 0; iy < steps; ++iy)
+                {
+                    debugDisplay.DrawQuad(
+                        surfacePoint(ix, iy), surfacePoint(ix + 1, iy), surfacePoint(ix + 1, iy + 1),
+                        surfacePoint(ix, iy + 1));
+                }
+            }
+        }
+        else
+        {
+            debugDisplay.DrawQuad(
+                AZ::Vector3(-halfExtents.GetX(), -halfExtents.GetY(), surfaceHeight),
+                AZ::Vector3(halfExtents.GetX(), -halfExtents.GetY(), surfaceHeight),
+                AZ::Vector3(halfExtents.GetX(), halfExtents.GetY(), surfaceHeight),
+                AZ::Vector3(-halfExtents.GetX(), halfExtents.GetY(), surfaceHeight));
+        }
 
         // Wireframe edges last, nearly opaque, so the extents stay readable where the
         // fill washes out against a bright background.
         debugDisplay.DepthWriteOn();
         debugDisplay.SetColor(EdgeColor);
-        debugDisplay.DrawWireBox(-halfExtents, halfExtents);
+        if (isSphere)
+        {
+            debugDisplay.DrawWireSphere(AZ::Vector3::CreateZero(), dimensions.GetX() * 0.5f);
+        }
+        else
+        {
+            debugDisplay.DrawWireBox(-halfExtents, halfExtents);
+        }
 
         debugDisplay.CullOn();
         debugDisplay.PopMatrix();

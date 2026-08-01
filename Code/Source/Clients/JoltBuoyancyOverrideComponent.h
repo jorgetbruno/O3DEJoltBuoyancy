@@ -37,6 +37,14 @@ namespace JoltBuoyancy
         {
             return m_excluded;
         }
+        float& AccessLinearDragMultiplier()
+        {
+            return m_linearDragMultiplier;
+        }
+        float& AccessAngularDragMultiplier()
+        {
+            return m_angularDragMultiplier;
+        }
 
     protected:
         // AZ::Component
@@ -50,6 +58,10 @@ namespace JoltBuoyancy
         JoltBuoyancyMode GetBuoyancyMode() const override;
         void SetBuoyancyFactor(float factor) override;
         float GetBuoyancyFactor() const override;
+        void SetLinearDragMultiplier(float multiplier) override;
+        float GetLinearDragMultiplier() const override;
+        void SetAngularDragMultiplier(float multiplier) override;
+        float GetAngularDragMultiplier() const override;
 
     private:
         //! Pushes the current values into the registry water volumes read while stepping.
@@ -57,6 +69,8 @@ namespace JoltBuoyancy
 
         JoltBuoyancyMode m_mode = JoltBuoyancyMode::Automatic;
         float m_factor = 1.2f;
+        float m_linearDragMultiplier = 1.0f;
+        float m_angularDragMultiplier = 1.0f;
         bool m_excluded = false;
     };
 } // namespace JoltBuoyancy

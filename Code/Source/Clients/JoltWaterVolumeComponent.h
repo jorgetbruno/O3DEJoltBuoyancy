@@ -45,6 +45,14 @@ namespace JoltBuoyancy
         {
             return m_visible;
         }
+        bool& AccessEnabled()
+        {
+            return m_enabled;
+        }
+        AZStd::string& AccessSceneName()
+        {
+            return m_sceneName;
+        }
 
     protected:
         // AZ::Component
@@ -74,10 +82,20 @@ namespace JoltBuoyancy
         bool GetWavesEnabled() const override;
         void SetWaveAmplitude(float amplitude) override;
         float GetWaveAmplitude() const override;
+        void SetWaveLength(float length) override;
+        float GetWaveLength() const override;
+        void SetWaveSpeed(float speed) override;
+        float GetWaveSpeed() const override;
+        void SetWaveDirection(const AZ::Vector2& direction) override;
+        AZ::Vector2 GetWaveDirection() const override;
         void SetEnabled(bool enabled) override;
         bool IsEnabled() const override;
         int GetSubmergedBodyCount() const override;
         float GetSubmergedFraction(AZ::EntityId bodyEntityId) const override;
+        bool IsPointUnderwater(const AZ::Vector3& worldPoint) const override;
+        AZ::Vector3 GetSurfacePositionAt(const AZ::Vector3& worldPoint) const override;
+        AZ::Vector3 GetSurfaceNormalAt(const AZ::Vector3& worldPoint) const override;
+        float GetDepthAt(const AZ::Vector3& worldPoint) const override;
 
     private:
         void RefreshVolume();
@@ -90,6 +108,14 @@ namespace JoltBuoyancy
         AZ::Vector3 m_dimensions = AZ::Vector3(10.0f, 10.0f, 5.0f);
         JoltWaterVolumeSettings m_settings;
         bool m_visible = true;
+
+        //! Serialized, so a level can author water that starts switched off and is turned
+        //! on by gameplay later.
+        bool m_enabled = true;
+
+        //! Which scene to attach to. Empty means the default scene, which is what almost
+        //! everything wants; naming one lets a volume live in a secondary scene.
+        AZStd::string m_sceneName;
 
         //! Kept in step with the volume so drawing needs no per-frame transform query.
         AZ::Transform m_worldTransform = AZ::Transform::CreateIdentity();
