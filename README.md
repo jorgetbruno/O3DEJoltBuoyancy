@@ -56,6 +56,27 @@ test in another module can catch it. The tests here call `Install()` rather than
 `RegisterDefaultAllocator` so there is one allocator story, but keep the call in every
 module entry point.
 
+**The allocator is not the only one.** Every Jolt static is per module, and the rule
+generalises: *if a Jolt global is written by one module and read by another, they are not
+the same global.* The second instance found the hard way was the debug renderer.
+`jolt_DebugSubmergedVolumes 1` set `Shape::sDrawSubmergedVolumes` — this module's copy,
+correctly, since this module's shape code is what the water volume calls — and that code
+then drew through `DebugRenderer::sInstance`, which is *also* per module and null here. The
+physics gem builds a renderer on the stack inside its own draw call, setting its own copy;
+this one never had anything. Result: a null dereference on a physics job thread, inside the
+step, the moment the CVar was flipped.
+
+`JoltBuoyancyDebugDraw` (`Source/Clients/JoltBuoyancyDebugDraw.{h,cpp}`) is the fix and the
+pattern to copy. It owns a `DebugRenderer` for this module and sets the flag and the
+renderer together, in the order that leaves no window where one exists without the other.
+Because Jolt draws from step listener jobs with every body mutex held — where O3DE's debug
+display bus must not be touched — the renderer *records* into a mutex-guarded buffer, and
+the water volume component drains it on the next tick. Draining empties the buffer, so two
+volumes in a scene cannot draw the same diagnostic twice.
+
+When adding anything that reaches for a Jolt global from this gem, check which module owns
+the copy you are writing and which module reads it.
+
 ## How the volume works
 
 `JoltWaterVolume` (`Source/Clients/JoltWaterVolume.{h,cpp}`) is the core, and three
@@ -291,7 +312,7 @@ cmd /c "C:\Users\jorge\O3DE\Projects\JoltPhysicsTest\build-env.cmd cmake --build
 
 ```
 cd build\windows\bin\profile
-.\AzTestRunner.exe JoltBuoyancy.Tests.dll AzRunUnitTests    # 76 tests
+.\AzTestRunner.exe JoltBuoyancy.Tests.dll AzRunUnitTests    # 77 tests
 ```
 
 Check the process exit code, not the console text.
@@ -374,7 +395,7 @@ would end up exactly where it does. Bodies are 1 m³ boxes, so mass *is* density
 tests predict — this is the confirmation the notes this file replaced were still waiting
 on, and it closes the last gap between "the maths is right" and "the feature works".
 
-**Also verified:** the gem and its editor module build; 76/76 unit tests pass against a
+**Also verified:** the gem and its editor module build; 77/77 unit tests pass against a
 real Jolt world; the level prefab is valid with the right editor components and masses;
 the game launcher loads the level and simulates it for 30 s with no crash, exercising
 the `Activate` → `AddStepListener` path that used to crash.

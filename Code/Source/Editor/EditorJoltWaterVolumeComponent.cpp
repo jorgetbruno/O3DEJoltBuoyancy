@@ -10,6 +10,7 @@
 
 #include <AzToolsFramework/ComponentModes/BoxComponentMode.h>
 
+#include <Clients/JoltBuoyancyDebugDraw.h>
 #include <Clients/JoltWaterVolumeComponent.h>
 #include <Clients/JoltWaterVolumeRender.h>
 
@@ -177,6 +178,11 @@ namespace JoltBuoyancy
     void EditorJoltWaterVolumeComponent::DisplayEntityViewport(
         const AzFramework::ViewportInfo& /*viewportInfo*/, AzFramework::DebugDisplayRequests& debugDisplay)
     {
+        // Drained even with the box hidden, and before the early-out: the diagnostic is
+        // asked for by console variable rather than by this component's Visible setting,
+        // and it describes the bodies rather than the volume.
+        JoltBuoyancyDebugDraw::Get().Flush(debugDisplay);
+
         if (!m_visible)
         {
             return;

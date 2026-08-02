@@ -1,6 +1,8 @@
 set(FILES
     Source/Clients/JoltBuoyancyAllocator.cpp
     Source/Clients/JoltBuoyancyAllocator.h
+    Source/Clients/JoltBuoyancyDebugDraw.cpp
+    Source/Clients/JoltBuoyancyDebugDraw.h
     Source/Clients/JoltBuoyancyOverrideComponent.cpp
     Source/Clients/JoltBuoyancyOverrideComponent.h
     Source/Clients/JoltBuoyancyOverrideRegistry.cpp

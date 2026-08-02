@@ -8,6 +8,7 @@
 
 #include <AzFramework/Physics/CollisionBus.h>
 
+#include <Clients/JoltBuoyancyDebugDraw.h>
 #include <Clients/JoltBuoyancyOverrideRegistry.h>
 #include <Clients/JoltWaterVolumeRegistry.h>
 #include <JoltPhysics/JoltPhysicsBus.h>
@@ -31,18 +32,16 @@ namespace JoltBuoyancy
         //! informative than the translucent box when a body floats at the wrong height,
         //! because it shows what the solver thinks is wet rather than where the water is.
         //!
-        //! A static inside Jolt, so it needs the debug renderer compiled in - profile and
-        //! debug builds have it, release does not.
-        //! Out of line because a preprocessor conditional cannot sit inside a macro
-        //! invocation, and AZ_CVAR takes the handler as an argument.
-        void SetDrawSubmergedVolumes([[maybe_unused]] bool enabled)
+        //! Setting Jolt's flag is not enough and used to take the engine down: the flag and
+        //! the renderer it draws through are both per-module statics, and this module has
+        //! no renderer of its own. JoltBuoyancyDebugDraw installs one and keeps the two in
+        //! step - see the comment there, it is the same trap as the allocator.
+        void SetDrawSubmergedVolumes(bool enabled)
         {
-#ifdef JPH_DEBUG_RENDERER
-            JPH::Shape::sDrawSubmergedVolumes = enabled;
-#else
-            AZ_Warning("JoltBuoyancy", !enabled,
-                "jolt_DebugSubmergedVolumes needs a build with Jolt's debug renderer, which release does not have.");
-#endif
+            const bool honoured = JoltBuoyancyDebugDraw::Get().SetSubmergedVolumesEnabled(enabled);
+            AZ_Warning("JoltBuoyancy", honoured,
+                "jolt_DebugSubmergedVolumes needs a build with Jolt's debug renderer, which release does not have. "
+                "Drawing is still off.");
         }
 
         AZ_CVAR(bool, jolt_DebugSubmergedVolumes, false,

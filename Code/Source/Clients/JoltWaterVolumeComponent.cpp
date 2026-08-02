@@ -9,6 +9,7 @@
 #include <AzFramework/Physics/PhysicsScene.h>
 #include <AzFramework/Physics/SystemBus.h>
 
+#include <Clients/JoltBuoyancyDebugDraw.h>
 #include <Clients/JoltWaterVolumeRender.h>
 
 namespace JoltBuoyancy
@@ -152,7 +153,12 @@ namespace JoltBuoyancy
     {
         UpdateFollowPosition();
 
-        if (!m_visible)
+        // The submerged-volume diagnostic is drained even when the water box is hidden.
+        // It is asked for by console variable, not by this component's Visible setting,
+        // and it describes bodies rather than the volume - hiding the box is usually
+        // exactly what someone does to see it more clearly.
+        const bool drawDiagnostic = JoltBuoyancyDebugDraw::Get().IsSubmergedVolumesEnabled();
+        if (!m_visible && !drawDiagnostic)
         {
             return;
         }
@@ -164,7 +170,15 @@ namespace JoltBuoyancy
         AzFramework::DebugDisplayRequestBus::Bind(debugDisplayBus, AzFramework::g_defaultSceneEntityDebugDisplayId);
         if (auto* debugDisplay = AzFramework::DebugDisplayRequestBus::FindFirstHandler(debugDisplayBus))
         {
-            DrawWaterVolume(*debugDisplay, m_worldTransform, m_dimensions, &m_settings, &m_waterVolume);
+            // Whatever Jolt recorded during the last step, drawn now that the body mutexes
+            // are released and this is the main thread. Drains, so the first volume to run
+            // gets it and the rest draw nothing rather than duplicating it.
+            JoltBuoyancyDebugDraw::Get().Flush(*debugDisplay);
+
+            if (m_visible)
+            {
+                DrawWaterVolume(*debugDisplay, m_worldTransform, m_dimensions, &m_settings, &m_waterVolume);
+            }
         }
     }
 

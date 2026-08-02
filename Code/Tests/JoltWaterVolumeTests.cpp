@@ -2,6 +2,7 @@
 #include <AzCore/UnitTest/TestTypes.h>
 
 #include <Clients/JoltBuoyancyAllocator.h>
+#include <Clients/JoltBuoyancyDebugDraw.h>
 #include <Clients/JoltBuoyancyOverrideRegistry.h>
 #include <Clients/JoltGerstnerWaves.h>
 #include <Clients/JoltWaterVolume.h>
@@ -1372,6 +1373,54 @@ namespace JoltBuoyancy
 
         river.Detach();
         m_extraVolumes.clear();
+    }
+
+    TEST_F(JoltWaterVolumeTests, DrawingSubmergedVolumesDoesNotCrashTheStep)
+    {
+        // jolt_DebugSubmergedVolumes 1 used to take the engine down on the next physics
+        // step. Both halves of the machinery are per-module statics: setting
+        // Shape::sDrawSubmergedVolumes turned drawing on for this module's copy of Jolt's
+        // shape code, and that code drew through DebugRenderer::sInstance - this module's
+        // copy of which is null and always was. The physics gem's renderer sets its own
+        // module's copy, which is no help here. Same trap as the allocator.
+        //
+        // Nothing in a unit test can look at pixels, but the crash was a null dereference
+        // on a job thread inside the step, and that is entirely reachable from here.
+        CreateWater();
+        auto cube = CreateCube(500.0f, -1.0f);
+        SetBodyEntityId(cube, AZ::EntityId(0xD8A9u));
+
+        ASSERT_TRUE(JoltBuoyancyDebugDraw::Get().SetSubmergedVolumesEnabled(true))
+            << "the tests build with Jolt's debug renderer, so this has to be honoured";
+        EXPECT_TRUE(JoltBuoyancyDebugDraw::Get().IsSubmergedVolumesEnabled());
+
+        Simulate(0.5f);
+
+        AZStd::vector<JoltDebugLine> lines;
+        AZStd::vector<JoltDebugLabel> labels;
+        JoltBuoyancyDebugDraw::Get().Drain(lines, labels);
+
+        // Surviving the step is the fix; recording something is what makes the diagnostic
+        // worth having rather than merely harmless.
+        EXPECT_FALSE(lines.empty()) << "a submerged body should have produced geometry to draw";
+        EXPECT_FALSE(labels.empty()) << "and the submerged/total readout Jolt writes at the centre of buoyancy";
+
+        // Draining leaves the buffer empty, so two volumes drawing in one frame cannot
+        // both emit the same primitives.
+        AZStd::vector<JoltDebugLine> second;
+        AZStd::vector<JoltDebugLabel> secondLabels;
+        JoltBuoyancyDebugDraw::Get().Drain(second, secondLabels);
+        EXPECT_TRUE(second.empty());
+        EXPECT_TRUE(secondLabels.empty());
+
+        JoltBuoyancyDebugDraw::Get().SetSubmergedVolumesEnabled(false);
+        EXPECT_FALSE(JoltBuoyancyDebugDraw::Get().IsSubmergedVolumesEnabled());
+
+        // And it stays off through a step, rather than leaving the flag set with the
+        // renderer already gone - which is the exact state that crashed.
+        Simulate(0.2f);
+        JoltBuoyancyDebugDraw::Get().Drain(lines, labels);
+        EXPECT_TRUE(lines.empty()) << "turning it off has to stop the recording, not just the drawing";
     }
 
     TEST_F(JoltWaterVolumeTests, AttachingToNothingFails)
